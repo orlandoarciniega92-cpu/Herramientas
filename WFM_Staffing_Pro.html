@@ -1,0 +1,1893 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WFM Staffing Pro — Callcom</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #06090f; color: #e8ecf4; }
+    input[type=range] { cursor: pointer; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0d1321; }
+    ::-webkit-scrollbar-thumb { background: #253352; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" data-presets="react">
+const { useState, useCallback, useMemo, useRef, useEffect } = React;
+
+// ─── WFM Math Engine ───────────────────────────────────────────────
+function factorial(n) {
+  if (n <= 1) return 1;
+  let r = 1;
+  for (let i = 2; i <= n; i++) r *= i;
+  return r;
+}
+function erlangC_Pw(N, A) {
+  if (N <= 0 || A <= 0 || N <= A) return 1;
+  const num = (Math.pow(A, N) / factorial(N)) * (N / (N - A));
+  let denom = 0;
+  for (let k = 0; k < N; k++) denom += Math.pow(A, k) / factorial(k);
+  denom += num;
+  return Math.min(1, Math.max(0, num / denom));
+}
+function erlangC_SL(N, A, tgtTime, AHT) {
+  if (N <= A || N <= 0) return 0;
+  const Pw = erlangC_Pw(N, A);
+  return Math.max(0, Math.min(1, 1 - Pw * Math.exp(-(N - A) * (tgtTime / AHT))));
+}
+function erlangA_SL(N, A, tgtTime, AHT, patience) {
+  if (N <= 0 || A <= 0) return 1;
+  if (patience <= 0) return erlangC_SL(N, A, tgtTime, AHT);
+  const Pw = erlangC_Pw(N, A);
+  if (N > A) {
+    const eff = 1 - Pw * Math.exp(-(N - A) * (tgtTime / AHT)) * (1 - (1 - Math.exp(-tgtTime / patience)));
+    return Math.min(1, Math.max(0, eff));
+  }
+  return 0;
+}
+function findAgentsErlangC(calls, AHT, tgtSL, tgtTime, shrink) {
+  if (calls <= 0) return { agents: 0, raw: 0, sl: 1, occ: 0, asa: 0, erlangs: 0 };
+  const A = (calls * AHT) / 3600;
+  let N = Math.max(1, Math.ceil(A));
+  while (N < 1000) {
+    const sl = erlangC_SL(N, A, tgtTime, AHT);
+    if (sl >= tgtSL) {
+      const Pw = erlangC_Pw(N, A);
+      const occ = A / N;
+      const asa = N > A ? (Pw * AHT) / (N - A) : 999;
+      const adj = Math.ceil(N / (1 - shrink / 100));
+      return { agents: adj, raw: N, sl, occ, asa, erlangs: A };
+    }
+    N++;
+  }
+  return { agents: N, raw: N, sl: 0, occ: 1, asa: 999, erlangs: A };
+}
+function findAgentsErlangA(calls, AHT, tgtSL, tgtTime, shrink, patience) {
+  if (calls <= 0) return { agents: 0, raw: 0, sl: 1, occ: 0, asa: 0, erlangs: 0 };
+  const A = (calls * AHT) / 3600;
+  let N = Math.max(1, Math.ceil(A));
+  while (N < 1000) {
+    const sl = erlangA_SL(N, A, tgtTime, AHT, patience);
+    if (sl >= tgtSL) {
+      const Pw = erlangC_Pw(N, A);
+      const occ = A / N;
+      const asa = N > A ? (Pw * AHT) / (N - A) : 999;
+      const adj = Math.ceil(N / (1 - shrink / 100));
+      return { agents: adj, raw: N, sl, occ, asa, erlangs: A };
+    }
+    N++;
+  }
+  return { agents: N, raw: N, sl: 0, occ: 1, asa: 999, erlangs: A };
+}
+function msgCapacity(msgs, perAgent, shrink) {
+  if (msgs <= 0) return { agents: 0, raw: 0 };
+  const raw = Math.ceil(msgs / perAgent);
+  const adj = Math.ceil(raw / (1 - shrink / 100));
+  return { agents: adj, raw };
+}
+function inverseSL(agents, calls, AHT, tgtTime, model, patience) {
+  if (calls <= 0 || agents <= 0) return { sl: 1, occ: 0, asa: 0 };
+  const A = (calls * AHT) / 3600;
+  if (agents <= A) return { sl: 0, occ: 1, asa: 999 };
+  const sl = model === "erlangA" ? erlangA_SL(agents, A, tgtTime, AHT, patience || 120) : erlangC_SL(agents, A, tgtTime, AHT);
+  const Pw = erlangC_Pw(agents, A);
+  const occ = A / agents;
+  const asa = agents > A ? (Pw * AHT) / (agents - A) : 999;
+  return { sl, occ, asa };
+}
+
+const HOURS = Array.from({ length: 15 }, (_, i) => i + 8);
+const DAYS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"];
+const DAYS_SHORT = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"];
+const MODELS = [{ id: "erlangC", label: "Erlang C" }, { id: "erlangA", label: "Erlang A" }, { id: "msgs", label: "Capacidad Mensajes" }];
+const DEF_PARAMS = {
+  erlangC: { aht: 300, targetSL: 0.8, targetTime: 30, shrinkage: 15 },
+  erlangA: { aht: 300, targetSL: 0.8, targetTime: 30, shrinkage: 15, patience: 120 },
+  msgs: { msgsPerAgent: 4, shrinkage: 15 },
+};
+const PRELOAD = {
+  "Mkt-Voz": { model: "erlangC", data: { lunes: [0,6,17,22,10,24,15,21,17,19,17,15,13,15,6], martes: [6,11,7,24,18,19,22,16,16,20,14,15,10,9,5], miércoles: [6,9,15,17,22,18,17,15,9,17,15,14,14,11,5], jueves: [5,13,15,17,16,12,19,17,15,13,15,14,12,12,3], viernes: [4,7,12,12,13,12,15,14,15,12,12,8,7,3,4], sábado: [3,10,11,15,13,17,15,12,14,13,14,7,5,8,5], domingo: [5,10,13,16,12,17,15,9,13,10,7,11,8,5,1] } },
+  "Mkt-WhatsApp": { model: "msgs", data: { lunes: [0,6,9,8,13,8,10,11,10,4,10,7,6,8,7], martes: [13,9,8,11,10,10,10,10,9,12,11,8,8,8,8], miércoles: [15,13,14,16,9,9,11,13,10,12,12,13,13,13,13], jueves: [11,13,12,16,19,15,13,13,7,3,13,14,12,8,10], viernes: [11,12,15,14,14,14,12,16,16,12,10,14,13,10,8], sábado: [11,16,11,14,14,16,12,13,13,10,11,14,12,11,10], domingo: [8,11,8,12,7,8,7,5,5,7,7,5,6,5,3] } },
+  "Bitrix": { model: "msgs", data: { lunes: [55,76,64,67,56,81,71,55,56,66,57,56,38,31,38], martes: [55,55,69,72,71,81,64,65,61,68,61,58,40,38,31], miércoles: [61,67,87,86,69,63,71,57,57,57,57,51,41,24,38], jueves: [55,65,70,82,65,69,67,61,57,61,47,47,47,34,24], viernes: [61,74,70,81,62,62,62,67,57,53,43,40,40,34,29], sábado: [54,65,63,60,77,67,67,62,67,49,43,43,41,32,32], domingo: [48,60,72,72,68,65,65,65,62,50,49,50,41,32,59] } },
+};
+
+// ─── Colors ──────────────────────────────────────────
+const C = {
+  bg: "#06090f", s1: "#0d1321", s2: "#151d2e", s3: "#1b2740",
+  bd: "#253352", bdL: "#2f4068",
+  ac: "#00e5a0", acD: "rgba(0,229,160,.1)", acG: "rgba(0,229,160,.3)",
+  w: "#f5c542", wD: "rgba(245,197,66,.1)",
+  r: "#ff5c5c", rD: "rgba(255,92,92,.1)",
+  t: "#e8ecf4", tD: "#94a3b8", tM: "#64748b",
+  bl: "#38bdf8", blD: "rgba(56,189,248,.1)",
+  p: "#c084fc", pD: "rgba(192,132,252,.1)",
+  o: "#fb923c", oD: "rgba(251,146,60,.1)",
+};
+
+const TABS = [
+  { id: "calc", label: "Calculadora", icon: "⚙️" },
+  { id: "import", label: "Importar", icon: "📤" },
+  { id: "heat", label: "Mapa Calor", icon: "🔥" },
+  { id: "total", label: "Agentes Totales", icon: "🧮" },
+  { id: "sched", label: "Horarios", icon: "🗓️" },
+  { id: "fte", label: "FTEs / Turnos", icon: "👥" },
+  { id: "scen", label: "Escenarios", icon: "🔀" },
+  { id: "inv", label: "Inversa", icon: "🔄" },
+  { id: "exp", label: "Exportar", icon: "📥" },
+  { id: "manual", label: "Manual", icon: "📖" },
+  { id: "defs", label: "Definiciones", icon: "📚" },
+];
+
+// ─── Shared styles ───────────────────────────────────
+const font = "'JetBrains Mono','Fira Code','SF Mono',monospace";
+const fontH = "'Space Grotesk','Inter',sans-serif";
+const lbl = { display: "block", fontSize: 10, color: C.tM, marginBottom: 3, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".06em", fontFamily: font };
+const inp = { background: C.bg, border: `1px solid ${C.bd}`, borderRadius: 6, padding: "5px 8px", color: C.t, fontSize: 12, fontFamily: font, outline: "none", width: 80 };
+const sel = { ...inp, width: 150, cursor: "pointer" };
+const th = { padding: "7px 8px", textAlign: "left", fontSize: 10, color: C.tM, fontWeight: 600, textTransform: "uppercase", letterSpacing: ".04em", borderBottom: `2px solid ${C.bd}`, fontFamily: font };
+const td = { padding: "5px 8px", fontSize: 12, fontFamily: font };
+const card = { background: C.s2, border: `1px solid ${C.bd}`, borderRadius: 12, marginBottom: 14, overflow: "hidden" };
+const btn = (active, color = C.ac, bgColor = C.acD) => ({
+  padding: "6px 14px", borderRadius: 7, border: active ? `1px solid ${color}` : `1px solid ${C.bd}`,
+  background: active ? bgColor : "transparent", color: active ? color : C.tD, fontSize: 11, fontWeight: 500,
+  cursor: "pointer", fontFamily: font, transition: "all .15s",
+});
+
+function calcResults(camp) {
+  const res = {};
+  DAYS.forEach(day => {
+    res[day] = HOURS.map((_, i) => {
+      const vol = camp.data[day]?.[i] || 0;
+      if (camp.model === "erlangC") return findAgentsErlangC(vol, camp.params.aht, camp.params.targetSL, camp.params.targetTime, camp.params.shrinkage);
+      if (camp.model === "erlangA") return findAgentsErlangA(vol, camp.params.aht, camp.params.targetSL, camp.params.targetTime, camp.params.shrinkage, camp.params.patience);
+      return msgCapacity(vol, camp.params.msgsPerAgent, camp.params.shrinkage);
+    });
+  });
+  return res;
+}
+
+// ─── Main App ────────────────────────────────────────
+function App() {
+  const [tab, setTab] = useState("calc");
+  const [campaigns, setCampaigns] = useState(() =>
+    Object.entries(PRELOAD).map(([name, cfg]) => ({
+      id: Date.now() + Math.random(), name, model: cfg.model,
+      params: { ...DEF_PARAMS[cfg.model] }, data: { ...cfg.data }, dayView: "lunes",
+    }))
+  );
+  const addCamp = () => setCampaigns(p => [...p, {
+    id: Date.now(), name: `Campaña ${p.length + 1}`, model: "erlangC",
+    params: { ...DEF_PARAMS.erlangC }, data: Object.fromEntries(DAYS.map(d => [d, Array(15).fill(0)])), dayView: "lunes",
+  }]);
+  const upd = useCallback((id, fn) => setCampaigns(p => p.map(c => c.id === id ? fn(c) : c)), []);
+  const del = useCallback((id) => setCampaigns(p => p.filter(c => c.id !== id)), []);
+  const allResults = useMemo(() => campaigns.map(c => ({ camp: c, results: calcResults(c) })), [campaigns]);
+
+  // Schedule state (lifted so it persists across tab changes)
+  const [schedShifts, setSchedShifts] = useState(DEFAULT_SHIFTS);
+  const [schedStaff, setSchedStaff] = useState(() => Object.fromEntries(DEFAULT_SHIFTS.map(s => [s.id, 0])));
+  const [schedSatPct, setSchedSatPct] = useState(() => Object.fromEntries(DEFAULT_SHIFTS.filter(s => s.weekend === "split").map(s => [s.id, 50])));
+
+  return (
+    <div style={{ background: C.bg, minHeight: "100vh", color: C.t, fontFamily: font }}>
+      <Nav tab={tab} setTab={setTab} />
+      <div style={{ padding: "16px 20px", maxWidth: 1500, margin: "0 auto" }}>
+        {tab === "calc" && <CalcTab campaigns={campaigns} addCamp={addCamp} upd={upd} del={del} allResults={allResults} />}
+        {tab === "import" && <ImportTab campaigns={campaigns} setCampaigns={setCampaigns} />}
+        {tab === "heat" && <HeatTab allResults={allResults} />}
+        {tab === "total" && <TotalTab allResults={allResults} />}
+        {tab === "sched" && <ScheduleTab allResults={allResults} shifts={schedShifts} setShifts={setSchedShifts} staff={schedStaff} setStaff={setSchedStaff} satPct={schedSatPct} setSatPct={setSchedSatPct} />}
+        {tab === "fte" && <FTETab allResults={allResults} />}
+        {tab === "scen" && <ScenarioTab campaigns={campaigns} />}
+        {tab === "inv" && <InverseTab />}
+        {tab === "exp" && <ExportTab allResults={allResults} />}
+        {tab === "manual" && <ManualTab />}
+        {tab === "defs" && <DefsTab />}
+      </div>
+    </div>
+  );
+}
+
+function Nav({ tab, setTab }) {
+  return (
+    <div style={{ background: C.s1, borderBottom: `1px solid ${C.bd}`, padding: "12px 20px" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 36, height: 36, borderRadius: 9, background: `linear-gradient(135deg,${C.ac},#059669)`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18 }}>📊</div>
+          <div>
+            <div style={{ fontFamily: fontH, fontWeight: 700, fontSize: 16, letterSpacing: "-.02em" }}>WFM <span style={{ color: C.ac }}>Staffing Pro</span></div>
+            <div style={{ fontSize: 10, color: C.tD }}>Callcom · v2.0 · Erlang C · Erlang A · Mensajes · Multi-módulo</div>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 3, background: C.bg, borderRadius: 9, padding: 3, flexWrap: "wrap" }}>
+          {TABS.map(t => (
+            <button key={t.id} onClick={() => setTab(t.id)} style={{
+              padding: "6px 12px", borderRadius: 7, border: "none",
+              background: tab === t.id ? C.ac : "transparent", color: tab === t.id ? C.bg : C.tD,
+              fontWeight: tab === t.id ? 700 : 400, fontSize: 11, cursor: "pointer", fontFamily: font, transition: "all .15s",
+            }}>{t.icon} {t.label}</button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+//  TAB 1: CALCULADORA
+// ═══════════════════════════════════════════════════════
+function CalcTab({ campaigns, addCamp, upd, del, allResults }) {
+  return (
+    <>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <h2 style={{ fontFamily: fontH, fontSize: 15, fontWeight: 600, margin: 0 }}>Campañas ({campaigns.length})</h2>
+        <button onClick={addCamp} style={{ padding: "7px 18px", borderRadius: 8, border: "none", background: C.ac, color: C.bg, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: font }}>+ Agregar Campaña</button>
+      </div>
+      {allResults.map(({ camp, results }) => <CampCard key={camp.id} camp={camp} results={results} upd={upd} del={del} />)}
+    </>
+  );
+}
+
+function CampCard({ camp, results, upd, del }) {
+  const [col, setCol] = useState(false);
+  const [weekly, setWeekly] = useState(false);
+  const setP = (k, v) => upd(camp.id, c => ({ ...c, params: { ...c.params, [k]: v } }));
+  const setModel = m => upd(camp.id, c => ({ ...c, model: m, params: { ...DEF_PARAMS[m] } }));
+  const setVol = (day, i, v) => upd(camp.id, c => ({ ...c, data: { ...c.data, [day]: c.data[day].map((x, j) => j === i ? (isNaN(+v) ? 0 : +v) : x) } }));
+  const mc = camp.model === "erlangC" ? C.bl : camp.model === "erlangA" ? C.p : C.w;
+  const mb = camp.model === "erlangC" ? C.blD : camp.model === "erlangA" ? C.pD : C.wD;
+
+  return (
+    <div style={card}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", borderBottom: col ? "none" : `1px solid ${C.bd}`, cursor: "pointer" }} onClick={() => setCol(!col)}>
+        <span style={{ fontSize: 9, color: C.tD, transform: col ? "rotate(-90deg)" : "", transition: "transform .15s" }}>▼</span>
+        <input value={camp.name} onClick={e => e.stopPropagation()} onChange={e => upd(camp.id, c => ({ ...c, name: e.target.value }))}
+          style={{ background: "transparent", border: "none", color: C.t, fontWeight: 600, fontSize: 14, fontFamily: fontH, outline: "none", width: 180 }} />
+        <span style={{ padding: "2px 8px", borderRadius: 5, fontSize: 10, fontWeight: 600, background: mb, color: mc }}>{MODELS.find(m => m.id === camp.model)?.label}</span>
+        <div style={{ flex: 1 }} />
+        <button onClick={e => { e.stopPropagation(); del(camp.id); }} style={{ background: C.rD, border: "none", color: C.r, borderRadius: 5, padding: "3px 8px", fontSize: 10, cursor: "pointer", fontFamily: font }}>✕</button>
+      </div>
+      {!col && (
+        <div style={{ padding: "14px 16px" }}>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 14 }}>
+            <div><label style={lbl}>Modelo</label><select value={camp.model} onChange={e => setModel(e.target.value)} style={sel}>{MODELS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}</select></div>
+            {(camp.model === "erlangC" || camp.model === "erlangA") && <>
+              <PI label="AHT (seg)" value={camp.params.aht} set={v => setP("aht", v)} />
+              <PI label="SL Obj (%)" value={Math.round(camp.params.targetSL * 100)} set={v => setP("targetSL", v / 100)} />
+              <PI label="T.Espera (seg)" value={camp.params.targetTime} set={v => setP("targetTime", v)} />
+              <PI label="Shrinkage (%)" value={camp.params.shrinkage} set={v => setP("shrinkage", v)} />
+            </>}
+            {camp.model === "erlangA" && <PI label="Paciencia (seg)" value={camp.params.patience} set={v => setP("patience", v)} />}
+            {camp.model === "msgs" && <>
+              <PI label="Msgs/Ag/Hora" value={camp.params.msgsPerAgent} set={v => setP("msgsPerAgent", v)} />
+              <PI label="Shrinkage (%)" value={camp.params.shrinkage} set={v => setP("shrinkage", v)} />
+            </>}
+          </div>
+          <div style={{ display: "flex", gap: 5, marginBottom: 10, flexWrap: "wrap" }}>
+            {DAYS.map(d => <button key={d} onClick={() => upd(camp.id, c => ({ ...c, dayView: d }))} style={btn(camp.dayView === d && !weekly, C.ac, C.acD)}>{d}</button>)}
+            <button onClick={() => setWeekly(!weekly)} style={btn(weekly, C.w, C.wD)}>📋 Semanal</button>
+          </div>
+          {!weekly
+            ? <DayTbl day={camp.dayView} data={camp.data[camp.dayView]} res={results[camp.dayView]} model={camp.model} setVol={(i, v) => setVol(camp.dayView, i, v)} />
+            : <WeekTbl data={camp.data} res={results} model={camp.model} />}
+        </div>
+      )}
+    </div>
+  );
+}
+function PI({ label, value, set }) {
+  return <div><label style={lbl}>{label}</label><input type="number" value={value} onChange={e => set(+e.target.value)} style={inp} /></div>;
+}
+function DayTbl({ day, data, res, model, setVol }) {
+  const isV = model !== "msgs";
+  const mx = Math.max(...res.map(r => r.agents), 1);
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <thead><tr>
+          <th style={th}>Hora</th><th style={th}>{isV ? "Llamadas" : "Mensajes"}</th>
+          <th style={{ ...th, color: C.ac }}>Ag. Req</th><th style={th}>Sin Shr.</th>
+          {isV && <><th style={th}>SL</th><th style={th}>Ocp</th><th style={th}>ASA</th></>}
+          <th style={th}>Carga</th>
+        </tr></thead>
+        <tbody>
+          {HOURS.map((h, i) => {
+            const r = res[i]; const pct = (r.agents / mx) * 100;
+            return (
+              <tr key={h} style={{ borderBottom: `1px solid ${C.bd}22` }}>
+                <td style={td}>{String(h).padStart(2, "0")}:00</td>
+                <td style={td}><input type="number" value={data[i]} onChange={e => setVol(i, e.target.value)} style={{ ...inp, width: 60, padding: "3px 6px", textAlign: "center" }} /></td>
+                <td style={{ ...td, color: C.ac, fontWeight: 700 }}>{r.agents}</td>
+                <td style={{ ...td, color: C.tD }}>{r.raw}</td>
+                {isV && <><td style={{ ...td, color: r.sl >= .8 ? C.ac : r.sl >= .6 ? C.w : C.r }}>{(r.sl * 100).toFixed(1)}%</td>
+                  <td style={{ ...td, color: r.occ > .85 ? C.r : r.occ > .7 ? C.w : C.ac }}>{(r.occ * 100).toFixed(1)}%</td>
+                  <td style={td}>{r.asa < 999 ? r.asa.toFixed(1) : "—"}</td></>}
+                <td style={{ ...td, width: 100 }}><div style={{ background: C.bg, borderRadius: 3, height: 12, overflow: "hidden" }}><div style={{ width: `${pct}%`, height: "100%", background: `linear-gradient(90deg,${C.ac},#059669)`, borderRadius: 3 }} /></div></td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+function WeekTbl({ data, res, model }) {
+  const isV = model !== "msgs";
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <thead>
+          <tr><th style={th}>Hora</th>{DAYS.map(d => <th key={d} style={th} colSpan={2}>{d.slice(0, 3)}</th>)}</tr>
+          <tr><th style={{ ...th, fontSize: 9 }}></th>{DAYS.map(d => <React.Fragment key={d}><th style={{ ...th, fontSize: 9, color: C.tM }}>{isV ? "Ll" : "Ms"}</th><th style={{ ...th, fontSize: 9, color: C.ac }}>Ag</th></React.Fragment>)}</tr>
+        </thead>
+        <tbody>
+          {HOURS.map((h, i) => (
+            <tr key={h} style={{ borderBottom: `1px solid ${C.bd}22` }}>
+              <td style={td}>{String(h).padStart(2, "0")}:00</td>
+              {DAYS.map(d => <React.Fragment key={d}><td style={{ ...td, color: C.tD, fontSize: 11 }}>{data[d]?.[i] || 0}</td><td style={{ ...td, color: C.ac, fontWeight: 600, fontSize: 11 }}>{res[d]?.[i]?.agents || 0}</td></React.Fragment>)}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+//  TAB: IMPORTAR DATOS
+// ═══════════════════════════════════════════════════════
+function ImportTab({ campaigns, setCampaigns }) {
+  const [file, setFile] = useState(null);
+  const [parsed, setParsed] = useState(null); // { multi: bool, campaigns: {name: {data}}, rowCount, skipped, headers, campNames }
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  const [targetCamp, setTargetCamp] = useState("");
+  const [newCampName, setNewCampName] = useState("");
+  const [newCampModel, setNewCampModel] = useState("erlangC");
+  const [mode, setMode] = useState("existing");
+  const [previewCamp, setPreviewCamp] = useState("");
+  // For multi-campaign: model assignment per detected campaign
+  const [campModels, setCampModels] = useState({});
+  const fileRef = useRef(null);
+
+  const DAYMAP = {
+    lunes: "lunes", monday: "lunes", lun: "lunes", mon: "lunes",
+    martes: "martes", tuesday: "martes", mar: "martes", tue: "martes",
+    "miércoles": "miércoles", miercoles: "miércoles", wednesday: "miércoles", "mié": "miércoles", mie: "miércoles", wed: "miércoles",
+    jueves: "jueves", thursday: "jueves", jue: "jueves", thu: "jueves",
+    viernes: "viernes", friday: "viernes", vie: "viernes", fri: "viernes",
+    "sábado": "sábado", sabado: "sábado", saturday: "sábado", "sáb": "sábado", sab: "sábado", sat: "sábado",
+    domingo: "domingo", sunday: "domingo", dom: "domingo", sun: "domingo",
+  };
+
+  const emptyData = () => Object.fromEntries(DAYS.map(d => [d, Array(15).fill(0)]));
+
+  const parseCSV = (text) => {
+    const lines = text.split(/\r?\n/).filter(l => l.trim());
+    if (lines.length < 2) throw new Error("El archivo debe tener al menos un encabezado y una fila de datos");
+    const sep = lines[0].includes("\t") ? "\t" : lines[0].includes(";") ? ";" : ",";
+    const headers = lines[0].split(sep).map(h => h.trim().toLowerCase().replace(/['"]/g, ""));
+
+    const campIdx = headers.findIndex(h => ["campaña", "campana", "campaign", "camp", "nombre_campaña", "nombre_campana", "skill", "queue"].includes(h));
+    const dayIdx = headers.findIndex(h => ["dia", "día", "day", "dia_semana", "dia semana", "fecha", "date"].includes(h));
+    const hourIdx = headers.findIndex(h => ["hora", "franja", "hour", "interval", "hora_franja", "hora franja"].includes(h));
+    const volIdx = headers.findIndex(h => ["llamadas", "mensajes", "volumen", "volume", "calls", "messages", "msgs", "contacts", "contactos", "cantidad", "count", "recuento", "total"].includes(h));
+
+    if (dayIdx === -1) throw new Error("No se encontró columna de día/fecha. Usa: dia, día, day, fecha, date");
+    if (hourIdx === -1) throw new Error("No se encontró columna de hora. Usa: hora, franja, hour, interval");
+    if (volIdx === -1) throw new Error("No se encontró columna de volumen. Usa: llamadas, mensajes, volumen, calls, messages, contactos");
+
+    // Day names in JS Date: 0=domingo, 1=lunes...
+    const JS_DAYS = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"];
+
+    // Try to parse a date string into a day name
+    const parseDayValue = (raw) => {
+      // First try direct day name mapping
+      const directDay = DAYMAP[raw.toLowerCase().trim()];
+      if (directDay) return directDay;
+
+      // Try parsing as date: DD/MM/YYYY, MM/DD/YYYY, YYYY-MM-DD, DD-MM-YYYY, etc.
+      let d = null;
+
+      // Try YYYY-MM-DD or YYYY/MM/DD (ISO-like)
+      const isoMatch = raw.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+      if (isoMatch) {
+        d = new Date(+isoMatch[1], +isoMatch[2] - 1, +isoMatch[3]);
+      }
+
+      // Try DD/MM/YYYY or DD-MM-YYYY (common in LATAM/Europe)
+      if (!d || isNaN(d.getTime())) {
+        const dmyMatch = raw.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+        if (dmyMatch) {
+          d = new Date(+dmyMatch[3], +dmyMatch[2] - 1, +dmyMatch[1]);
+        }
+      }
+
+      // Try MM/DD/YYYY
+      if (!d || isNaN(d.getTime())) {
+        const mdyMatch = raw.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+        if (mdyMatch) {
+          d = new Date(+mdyMatch[3], +mdyMatch[1] - 1, +mdyMatch[2]);
+        }
+      }
+
+      // Try Excel serial number (e.g. 46113 = a date)
+      if (!d || isNaN(d.getTime())) {
+        const num = parseFloat(raw);
+        if (!isNaN(num) && num > 40000 && num < 60000) {
+          d = new Date((num - 25569) * 86400000);
+        }
+      }
+
+      // Try native Date parse as last resort
+      if (!d || isNaN(d.getTime())) {
+        d = new Date(raw);
+      }
+
+      if (d && !isNaN(d.getTime())) {
+        return JS_DAYS[d.getDay()];
+      }
+
+      return null;
+    };
+
+    const hasMulti = campIdx !== -1;
+    const allCamps = {};
+    // For date-based files: accumulate totals per day-name+hour, then average
+    const accum = {}; // { campName: { day: { hour: { sum, count } } } }
+    let rowCount = 0, skipped = 0;
+    let usedDates = false;
+
+    for (let i = 1; i < lines.length; i++) {
+      const cols = lines[i].split(sep).map(c => c.trim().replace(/['"]/g, ""));
+      if (cols.length <= Math.max(dayIdx, hourIdx, volIdx)) continue;
+
+      const rawDayVal = cols[dayIdx].trim();
+      const day = parseDayValue(rawDayVal);
+      if (!day) { skipped++; continue; }
+
+      // Track if we're parsing dates (for averaging later)
+      if (!DAYMAP[rawDayVal.toLowerCase().trim()]) usedDates = true;
+
+      let hour = parseInt(cols[hourIdx]);
+      if (isNaN(hour)) {
+        const match = cols[hourIdx].match(/(\d+)/);
+        if (match) hour = parseInt(match[1]);
+        else { skipped++; continue; }
+      }
+      if (hour < 0 || hour > 23) { skipped++; continue; }
+      // Map hours outside 8-22 range: skip but don't error
+      if (hour < 8 || hour > 22) { skipped++; continue; }
+
+      const vol = parseFloat(cols[volIdx]) || 0;
+      const campName = hasMulti ? (cols[campIdx]?.trim() || "Sin nombre") : "__single__";
+
+      if (!accum[campName]) accum[campName] = {};
+      if (!accum[campName][day]) accum[campName][day] = {};
+      if (!accum[campName][day][hour]) accum[campName][day][hour] = { sum: 0, count: 0 };
+      accum[campName][day][hour].sum += vol;
+      accum[campName][day][hour].count += 1;
+      rowCount++;
+    }
+
+    if (rowCount === 0) throw new Error("No se pudieron procesar filas válidas. Verifica que la columna 'Dia' tenga nombres de día (lunes, martes...) o fechas (03/04/2026, 2026-04-03).");
+
+    // Build final data: if dates were used, average across same weekday; otherwise use raw values
+    Object.entries(accum).forEach(([campName, days]) => {
+      const data = emptyData();
+      Object.entries(days).forEach(([day, hours]) => {
+        Object.entries(hours).forEach(([h, { sum, count }]) => {
+          const idx = parseInt(h) - 8;
+          if (idx >= 0 && idx < 15) {
+            data[day][idx] = usedDates ? Math.round((sum / count) * 100) / 100 : sum;
+          }
+        });
+      });
+      allCamps[campName] = data;
+    });
+
+    const campNames = Object.keys(allCamps).filter(k => k !== "__single__");
+
+    return {
+      multi: hasMulti,
+      campaigns: allCamps,
+      rowCount, skipped,
+      headers: headers.map(h => h.charAt(0).toUpperCase() + h.slice(1)),
+      campNames,
+      singleData: hasMulti ? null : allCamps["__single__"],
+      usedDates,
+    };
+  };
+
+  const parseXLSX = async (arrayBuffer) => {
+    if (!window.XLSX) {
+      await new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+        script.onload = resolve;
+        script.onerror = () => reject(new Error("No se pudo cargar la librería de Excel"));
+        document.head.appendChild(script);
+      });
+    }
+    const wb = window.XLSX.read(arrayBuffer, { type: "array" });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const csvText = window.XLSX.utils.sheet_to_csv(ws);
+    return parseCSV(csvText);
+  };
+
+  const handleFile = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setFile(f); setError(""); setSuccess(""); setParsed(null);
+    try {
+      let result;
+      if (f.name.match(/\.(csv|tsv|txt)$/i)) {
+        result = parseCSV(await f.text());
+      } else if (f.name.match(/\.(xlsx|xls)$/i)) {
+        result = await parseXLSX(await f.arrayBuffer());
+      } else {
+        throw new Error("Formato no soportado. Usa .csv, .tsv, .xlsx o .xls");
+      }
+      setParsed(result);
+      if (result.multi && result.campNames.length > 0) {
+        setPreviewCamp(result.campNames[0]);
+        // Auto-guess models: if name contains whatsapp/bitrix/chat/msg → msgs, else erlangC
+        const models = {};
+        result.campNames.forEach(n => {
+          const low = n.toLowerCase();
+          if (low.includes("whatsapp") || low.includes("bitrix") || low.includes("chat") || low.includes("msg") || low.includes("mensaje")) {
+            models[n] = "msgs";
+          } else {
+            models[n] = "erlangC";
+          }
+        });
+        setCampModels(models);
+      }
+    } catch (err) { setError(err.message); }
+  };
+
+  const clearFile = () => {
+    setFile(null); setParsed(null); setError(""); setSuccess(""); setPreviewCamp("");
+    if (fileRef.current) fileRef.current.value = "";
+  };
+
+  // Apply for SINGLE campaign mode (no campaign column)
+  const applySingle = () => {
+    if (!parsed?.singleData) return;
+    if (mode === "existing") {
+      if (!targetCamp) { setError("Selecciona una campaña destino"); return; }
+      setCampaigns(prev => prev.map(c => c.id === targetCamp ? { ...c, data: { ...parsed.singleData } } : c));
+      setSuccess(`✅ ${parsed.rowCount} registros cargados a campaña existente.`);
+    } else {
+      if (!newCampName.trim()) { setError("Ingresa un nombre para la nueva campaña"); return; }
+      setCampaigns(prev => [...prev, {
+        id: Date.now() + Math.random(), name: newCampName.trim(), model: newCampModel,
+        params: { ...DEF_PARAMS[newCampModel] }, data: { ...parsed.singleData }, dayView: "lunes",
+      }]);
+      setSuccess(`✅ Campaña "${newCampName}" creada con ${parsed.rowCount} registros.`);
+    }
+    setError("");
+  };
+
+  // Apply for MULTI campaign mode (has campaign column)
+  const applyMulti = () => {
+    if (!parsed?.multi) return;
+    const newCamps = [];
+    const updatedIds = [];
+    parsed.campNames.forEach(name => {
+      const data = parsed.campaigns[name];
+      const mdl = campModels[name] || "erlangC";
+      // Try to match existing campaign by name
+      const existing = campaigns.find(c => c.name.toLowerCase().trim() === name.toLowerCase().trim());
+      if (existing) {
+        updatedIds.push(existing.id);
+        setCampaigns(prev => prev.map(c => c.id === existing.id ? { ...c, data: { ...data } } : c));
+      } else {
+        newCamps.push({
+          id: Date.now() + Math.random() + newCamps.length,
+          name, model: mdl, params: { ...DEF_PARAMS[mdl] }, data: { ...data }, dayView: "lunes",
+        });
+      }
+    });
+    if (newCamps.length > 0) setCampaigns(prev => [...prev, ...newCamps]);
+    const parts = [];
+    if (updatedIds.length > 0) parts.push(`${updatedIds.length} campaña(s) actualizadas`);
+    if (newCamps.length > 0) parts.push(`${newCamps.length} campaña(s) nuevas creadas`);
+    setSuccess(`✅ ${parsed.rowCount} registros importados. ${parts.join(", ")}.`);
+    setError("");
+  };
+
+  const downloadTemplate = (multi) => {
+    let csv;
+    if (multi) {
+      csv = "campaña,dia,hora,volumen\n";
+      ["Mkt-Voz", "Mkt-WhatsApp", "Bitrix"].forEach(camp => {
+        DAYS.forEach(d => HOURS.forEach(h => { csv += `${camp},${d},${h},0\n`; }));
+      });
+    } else {
+      csv = "dia,hora,volumen\n";
+      DAYS.forEach(d => HOURS.forEach(h => { csv += `${d},${h},0\n`; }));
+    }
+    const a = document.createElement("a");
+    a.href = "data:text/csv;charset=utf-8,\uFEFF" + encodeURIComponent(csv);
+    a.download = multi ? "plantilla_wfm_multi.csv" : "plantilla_wfm.csv";
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  };
+
+  const previewData = parsed?.multi ? parsed.campaigns[previewCamp] : parsed?.singleData;
+
+  return (
+    <>
+      <h2 style={{ fontFamily: fontH, fontSize: 15, fontWeight: 600, margin: "0 0 14px" }}>📤 Importar Datos desde Archivo</h2>
+
+      {/* Format guide + templates */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14 }}>
+        <div style={{ ...card, padding: 16, marginBottom: 0 }}>
+          <h3 style={{ fontFamily: fontH, fontSize: 13, fontWeight: 600, margin: "0 0 8px", color: C.bl }}>📋 Formato Esperado</h3>
+          <div style={{ fontSize: 11, color: C.tD, lineHeight: 1.7 }}>
+            <b style={{ color: C.t }}>Modo simple</b> (1 campaña por archivo):<br />
+            <span style={{ color: C.ac }}>dia, hora, volumen</span><br /><br />
+            <b style={{ color: C.t }}>Modo multi-campaña</b> (todas en un archivo):<br />
+            <span style={{ color: C.ac }}>campaña, dia, hora, volumen</span><br /><br />
+            La columna <b style={{ color: C.w }}>dia</b> acepta nombres (lunes, martes...) <b style={{ color: C.w }}>o fechas</b> (03/04/2026, 2026-04-03). Si usas fechas, se convierten a día de la semana y se promedian automáticamente.<br /><br />
+            Acepta: <span style={{ color: C.w }}>.csv, .tsv, .xlsx, .xls</span>
+          </div>
+        </div>
+        <div style={{ ...card, padding: 16, marginBottom: 0 }}>
+          <h3 style={{ fontFamily: fontH, fontSize: 13, fontWeight: 600, margin: "0 0 8px", color: C.w }}>⬇ Plantillas de Ejemplo</h3>
+          <div style={{ fontSize: 11, color: C.tD, lineHeight: 1.7, marginBottom: 12 }}>
+            Descarga la plantilla que necesites. Llénala con tus datos y súbela.
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={() => downloadTemplate(false)} style={{ padding: "8px 16px", borderRadius: 7, border: "none", background: C.w, color: C.bg, fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: font }}>
+              ⬇ Simple (1 campaña)
+            </button>
+            <button onClick={() => downloadTemplate(true)} style={{ padding: "8px 16px", borderRadius: 7, border: "none", background: C.o, color: C.bg, fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: font }}>
+              ⬇ Multi-campaña
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* File upload */}
+      <div style={{ ...card, padding: 20 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 14 }}>
+          <input ref={fileRef} type="file" accept=".csv,.tsv,.txt,.xlsx,.xls" onChange={handleFile} style={{ display: "none" }} />
+          <button onClick={() => fileRef.current?.click()} style={{ padding: "12px 28px", borderRadius: 10, border: `2px dashed ${C.bd}`, background: C.s1, color: C.t, fontWeight: 600, fontSize: 13, cursor: "pointer", fontFamily: font, flex: 1, textAlign: "center" }}>
+            {file ? `📄 ${file.name}` : "📂 Haz clic para seleccionar archivo (CSV / Excel)"}
+          </button>
+          {file && <button onClick={clearFile} style={{ padding: "8px 14px", borderRadius: 6, border: "none", background: C.rD, color: C.r, fontSize: 11, cursor: "pointer", fontFamily: font }}>✕ Limpiar</button>}
+        </div>
+
+        {error && <div style={{ padding: "10px 14px", background: C.rD, border: `1px solid ${C.r}44`, borderRadius: 8, color: C.r, fontSize: 12, marginBottom: 12 }}>❌ {error}</div>}
+        {success && <div style={{ padding: "10px 14px", background: C.acD, border: `1px solid ${C.ac}44`, borderRadius: 8, color: C.ac, fontSize: 12, marginBottom: 12 }}>{success}</div>}
+
+        {parsed && (
+          <>
+            {/* Stats */}
+            <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+              {[
+                { label: "Filas procesadas", val: parsed.rowCount, color: C.ac },
+                { label: "Filas omitidas", val: parsed.skipped, color: parsed.skipped > 0 ? C.w : C.tD },
+                { label: "Modo detectado", val: parsed.multi ? `Multi-campaña (${parsed.campNames.length})` : "Campaña única", color: parsed.multi ? C.o : C.bl },
+                { label: parsed.usedDates ? "Fechas → Promedios" : "Columnas", val: parsed.usedDates ? "Fechas convertidas a días (promediadas)" : parsed.headers.join(", "), color: parsed.usedDates ? C.w : C.tD },
+              ].map((s, i) => (
+                <div key={i} style={{ ...card, padding: "8px 14px", marginBottom: 0, flex: 1, minWidth: 140 }}>
+                  <div style={{ fontSize: 9, color: C.tM, textTransform: "uppercase" }}>{s.label}</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: s.color, fontFamily: fontH }}>{s.val}</div>
+                </div>
+              ))}
+            </div>
+
+            {/* MULTI-CAMPAIGN: detected campaigns + model assignment */}
+            {parsed.multi && (
+              <div style={{ background: C.s1, borderRadius: 10, padding: 16, marginBottom: 14 }}>
+                <h4 style={{ fontFamily: fontH, fontSize: 12, color: C.t, margin: "0 0 10px" }}>📦 Campañas Detectadas — Asigna modelo WFM a cada una</h4>
+                <div style={{ fontSize: 10, color: C.tD, marginBottom: 10 }}>Si ya existe una campaña con el mismo nombre, se actualizarán sus datos. Si no existe, se creará nueva.</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {parsed.campNames.map(name => {
+                    const existing = campaigns.find(c => c.name.toLowerCase().trim() === name.toLowerCase().trim());
+                    return (
+                      <div key={name} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 10px", background: C.s2, borderRadius: 8, border: `1px solid ${C.bd}` }}>
+                        <span style={{ fontWeight: 600, color: C.t, fontSize: 12, minWidth: 160 }}>{name}</span>
+                        {existing ? (
+                          <span style={{ fontSize: 10, color: C.ac, padding: "2px 8px", background: C.acD, borderRadius: 4 }}>↻ Actualizar existente ({MODELS.find(m => m.id === existing.model)?.label})</span>
+                        ) : (
+                          <>
+                            <span style={{ fontSize: 10, color: C.p, padding: "2px 8px", background: C.pD, borderRadius: 4 }}>+ Nueva</span>
+                            <select value={campModels[name] || "erlangC"} onChange={e => setCampModels(prev => ({ ...prev, [name]: e.target.value }))} style={{ ...sel, width: 140, fontSize: 10, padding: "3px 6px" }}>
+                              {MODELS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+                            </select>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Preview selector for multi */}
+            {parsed.multi && parsed.campNames.length > 0 && (
+              <div style={{ display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 11, color: C.tD, alignSelf: "center" }}>Vista previa:</span>
+                {parsed.campNames.map(n => (
+                  <button key={n} onClick={() => setPreviewCamp(n)} style={btn(previewCamp === n, C.ac, C.acD)}>{n}</button>
+                ))}
+              </div>
+            )}
+
+            {/* Preview table */}
+            {previewData && (
+              <div style={{ marginBottom: 14 }}>
+                <h4 style={{ fontFamily: fontH, fontSize: 12, color: C.tD, margin: "0 0 8px" }}>
+                  Vista Previa {parsed.multi ? `— ${previewCamp}` : ""}
+                </h4>
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ borderCollapse: "collapse", width: "100%" }}>
+                    <thead><tr><th style={th}>Hora</th>{DAYS.map((d, i) => <th key={d} style={{ ...th, textAlign: "center" }}>{DAYS_SHORT[i]}</th>)}</tr></thead>
+                    <tbody>
+                      {HOURS.map((h, i) => (
+                        <tr key={h} style={{ borderBottom: `1px solid ${C.bd}22` }}>
+                          <td style={{ ...td, fontWeight: 600, color: C.tD }}>{String(h).padStart(2, "0")}:00</td>
+                          {DAYS.map(d => {
+                            const v = previewData?.[d]?.[i] || 0;
+                            return <td key={d} style={{ ...td, textAlign: "center", color: v > 0 ? C.ac : C.tM }}>{v}</td>;
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* SINGLE MODE: target selection */}
+            {!parsed.multi && (
+              <div style={{ background: C.s1, borderRadius: 10, padding: 16, marginBottom: 14 }}>
+                <h4 style={{ fontFamily: fontH, fontSize: 12, color: C.t, margin: "0 0 10px" }}>¿Dónde cargar los datos?</h4>
+                <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+                  <button onClick={() => setMode("existing")} style={btn(mode === "existing", C.bl, C.blD)}>Campaña existente</button>
+                  <button onClick={() => setMode("new")} style={btn(mode === "new", C.p, C.pD)}>Crear nueva campaña</button>
+                </div>
+                {mode === "existing" ? (
+                  <div>
+                    <label style={lbl}>Campaña destino</label>
+                    <select value={targetCamp} onChange={e => setTargetCamp(e.target.value)} style={{ ...sel, width: 250 }}>
+                      <option value="">— Selecciona —</option>
+                      {campaigns.map(c => <option key={c.id} value={c.id}>{c.name} ({MODELS.find(m => m.id === c.model)?.label})</option>)}
+                    </select>
+                    <div style={{ fontSize: 10, color: C.w, marginTop: 6 }}>⚠ Reemplaza datos actuales de la campaña</div>
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                    <div><label style={lbl}>Nombre</label><input value={newCampName} onChange={e => setNewCampName(e.target.value)} placeholder="Ej: Portabilidad Q2" style={{ ...inp, width: 200 }} /></div>
+                    <div><label style={lbl}>Modelo</label><select value={newCampModel} onChange={e => setNewCampModel(e.target.value)} style={sel}>{MODELS.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}</select></div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <button onClick={parsed.multi ? applyMulti : applySingle} style={{ padding: "12px 30px", borderRadius: 10, border: "none", background: C.ac, color: C.bg, fontWeight: 700, fontSize: 13, cursor: "pointer", fontFamily: font }}>
+              {parsed.multi ? `✅ Importar ${parsed.campNames.length} Campañas` : `✅ Aplicar Datos a ${mode === "existing" ? "Campaña" : "Nueva Campaña"}`}
+            </button>
+          </>
+        )}
+      </div>
+
+      {/* Column names reference */}
+      <div style={{ ...card, padding: 16, marginTop: 14 }}>
+        <h3 style={{ fontFamily: fontH, fontSize: 13, fontWeight: 600, margin: "0 0 8px", color: C.tD }}>📝 Nombres de Columna Aceptados</h3>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, fontSize: 11, color: C.tD }}>
+          <div><span style={{ color: C.o, fontWeight: 600 }}>Campaña (opcional):</span> campaña, campana, campaign, camp, skill, queue</div>
+          <div><span style={{ color: C.ac, fontWeight: 600 }}>Día / Fecha:</span> dia, día, day, fecha, date, dia_semana</div>
+          <div><span style={{ color: C.ac, fontWeight: 600 }}>Hora:</span> hora, franja, hour, interval</div>
+          <div><span style={{ color: C.ac, fontWeight: 600 }}>Volumen:</span> llamadas, mensajes, volumen, calls, messages, contactos, cantidad, count, total</div>
+        </div>
+        <div style={{ marginTop: 10, fontSize: 11, color: C.tD }}>
+          <span style={{ color: C.w, fontWeight: 600 }}>Días:</span> lunes/monday/lun, martes/tuesday/mar, miércoles/wednesday/mié, jueves/thursday/jue, viernes/friday/vie, sábado/saturday/sáb, domingo/sunday/dom
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+//  TAB 2: MAPA DE CALOR
+// ═══════════════════════════════════════════════════════
+function HeatTab({ allResults }) {
+  const [heatSel, setHeatSel] = useState(0);
+  const [mode, setMode] = useState("agents");
+  const { camp, results } = allResults[heatSel] || allResults[0];
+  const vals = HOURS.map((_, i) => DAYS.map(d => mode === "agents" ? (results[d]?.[i]?.agents || 0) : (camp.data[d]?.[i] || 0)));
+  const flat = vals.flat();
+  const mx = Math.max(...flat, 1);
+  const mn = Math.min(...flat);
+
+  function heatColor(v) {
+    const ratio = mx > mn ? (v - mn) / (mx - mn) : 0;
+    if (ratio < 0.25) return `rgba(0,229,160,${0.1 + ratio * 0.3})`;
+    if (ratio < 0.5) return `rgba(245,197,66,${0.2 + ratio * 0.5})`;
+    if (ratio < 0.75) return `rgba(251,146,60,${0.3 + ratio * 0.5})`;
+    return `rgba(255,92,92,${0.4 + ratio * 0.5})`;
+  }
+
+  return (
+    <>
+      <h2 style={{ fontFamily: fontH, fontSize: 15, fontWeight: 600, margin: "0 0 14px" }}>🔥 Mapa de Calor Semanal</h2>
+      <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+        <div><label style={lbl}>Campaña</label><select value={heatSel} onChange={e => setHeatSel(+e.target.value)} style={sel}>{allResults.map((r, i) => <option key={i} value={i}>{r.camp.name}</option>)}</select></div>
+        <div><label style={lbl}>Métrica</label>
+          <select value={mode} onChange={e => setMode(e.target.value)} style={sel}>
+            <option value="agents">Agentes Requeridos</option><option value="volume">Volumen</option>
+          </select>
+        </div>
+      </div>
+      <div style={{ ...card, padding: 16, overflowX: "auto" }}>
+        <table style={{ borderCollapse: "collapse", width: "100%" }}>
+          <thead><tr><th style={th}>Hora</th>{DAYS.map((d, i) => <th key={d} style={{ ...th, textAlign: "center" }}>{DAYS_SHORT[i]}</th>)}</tr></thead>
+          <tbody>
+            {HOURS.map((h, i) => (
+              <tr key={h}>
+                <td style={{ ...td, fontWeight: 600, color: C.tD }}>{String(h).padStart(2, "0")}:00</td>
+                {DAYS.map((d, j) => {
+                  const v = vals[i][j];
+                  return <td key={d} style={{ ...td, textAlign: "center", fontWeight: 700, fontSize: 13, background: heatColor(v), borderRadius: 4, color: C.t, border: `2px solid ${C.bg}` }}>{v}</td>;
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12, fontSize: 10, color: C.tD }}>
+          <span>Menor</span>
+          <div style={{ display: "flex", height: 12, borderRadius: 6, overflow: "hidden", flex: 1, maxWidth: 200 }}>
+            {[0, .25, .5, .75, 1].map(r => <div key={r} style={{ flex: 1, background: r < .25 ? "rgba(0,229,160,.3)" : r < .5 ? "rgba(245,197,66,.5)" : r < .75 ? "rgba(251,146,60,.6)" : "rgba(255,92,92,.8)" }} />)}
+          </div>
+          <span>Mayor</span>
+        </div>
+      </div>
+
+      {/* Bar chart */}
+      <div style={{ ...card, padding: 16, marginTop: 14 }}>
+        <h3 style={{ fontFamily: fontH, fontSize: 13, fontWeight: 600, margin: "0 0 12px", color: C.tD }}>📊 Agentes Requeridos por Hora (Promedio Semanal)</h3>
+        <div style={{ display: "flex", alignItems: "flex-end", gap: 6, height: 180 }}>
+          {HOURS.map((h, i) => {
+            const avg = DAYS.reduce((s, d) => s + (results[d]?.[i]?.agents || 0), 0) / 7;
+            const pct = (avg / mx) * 100;
+            return (
+              <div key={h} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                <span style={{ fontSize: 9, color: C.ac, fontWeight: 600 }}>{avg.toFixed(1)}</span>
+                <div style={{ width: "100%", height: `${pct}%`, minHeight: 4, background: `linear-gradient(180deg,${C.ac},#059669)`, borderRadius: "4px 4px 0 0", transition: "height .3s" }} />
+                <span style={{ fontSize: 9, color: C.tM }}>{h}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+//  TAB: AGENTES TOTALES POR FRANJA
+// ═══════════════════════════════════════════════════════
+function TotalTab({ allResults }) {
+  const [dayView, setDayView] = useState("lunes");
+  const [weekly, setWeekly] = useState(false);
+
+  // Compute totals per hour per day across all campaigns
+  const totals = useMemo(() => {
+    const res = {};
+    DAYS.forEach(d => {
+      res[d] = HOURS.map((_, i) => {
+        const perCamp = allResults.map(({ camp, results }) => ({
+          name: camp.name,
+          agents: results[d]?.[i]?.agents || 0,
+        }));
+        const total = perCamp.reduce((s, c) => s + c.agents, 0);
+        return { perCamp, total };
+      });
+    });
+    return res;
+  }, [allResults]);
+
+  const peakTotal = Math.max(...DAYS.flatMap(d => totals[d].map(t => t.total)), 1);
+
+  // Colors for campaigns
+  const campColors = [C.bl, C.p, C.o, C.ac, C.w, C.r, "#22d3ee", "#a3e635", "#f472b6"];
+
+  return (
+    <>
+      <h2 style={{ fontFamily: fontH, fontSize: 15, fontWeight: 600, margin: "0 0 6px" }}>🧮 Agentes Totales por Franja</h2>
+      <p style={{ fontSize: 12, color: C.tD, margin: "0 0 14px" }}>
+        Suma de agentes requeridos de todas las campañas activas ({allResults.length}) por cada franja horaria.
+      </p>
+
+      {/* Legend */}
+      <div style={{ display: "flex", gap: 12, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
+        {allResults.map(({ camp }, idx) => (
+          <div key={camp.id} style={{ display: "flex", alignItems: "center", gap: 5 }}>
+            <div style={{ width: 10, height: 10, borderRadius: 3, background: campColors[idx % campColors.length] }} />
+            <span style={{ fontSize: 11, color: C.tD }}>{camp.name}</span>
+          </div>
+        ))}
+        <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+          <div style={{ width: 10, height: 10, borderRadius: 3, background: C.ac, border: `1px solid ${C.ac}` }} />
+          <span style={{ fontSize: 11, color: C.ac, fontWeight: 600 }}>TOTAL</span>
+        </div>
+      </div>
+
+      {/* Day tabs */}
+      <div style={{ display: "flex", gap: 5, marginBottom: 12, flexWrap: "wrap" }}>
+        {DAYS.map(d => (
+          <button key={d} onClick={() => { setDayView(d); setWeekly(false); }} style={btn(dayView === d && !weekly, C.ac, C.acD)}>{d}</button>
+        ))}
+        <button onClick={() => setWeekly(!weekly)} style={btn(weekly, C.w, C.wD)}>📋 Semanal</button>
+      </div>
+
+      {!weekly ? (
+        <>
+          {/* Single day table */}
+          <div style={{ ...card, padding: 16, overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  <th style={th}>Hora</th>
+                  {allResults.map(({ camp }, idx) => (
+                    <th key={camp.id} style={{ ...th, color: campColors[idx % campColors.length] }}>{camp.name}</th>
+                  ))}
+                  <th style={{ ...th, color: C.ac, fontSize: 11 }}>TOTAL</th>
+                  <th style={th}>Distribución</th>
+                </tr>
+              </thead>
+              <tbody>
+                {HOURS.map((h, i) => {
+                  const row = totals[dayView][i];
+                  return (
+                    <tr key={h} style={{ borderBottom: `1px solid ${C.bd}22` }}>
+                      <td style={{ ...td, fontWeight: 600, color: C.tD }}>{String(h).padStart(2, "0")}:00</td>
+                      {row.perCamp.map((c, idx) => (
+                        <td key={idx} style={{ ...td, color: campColors[idx % campColors.length], textAlign: "center" }}>{c.agents}</td>
+                      ))}
+                      <td style={{ ...td, color: C.ac, fontWeight: 700, fontSize: 14, textAlign: "center" }}>{row.total}</td>
+                      <td style={{ ...td, width: 180 }}>
+                        <div style={{ display: "flex", height: 18, borderRadius: 4, overflow: "hidden", background: C.bg }}>
+                          {row.perCamp.map((c, idx) => {
+                            const pct = row.total > 0 ? (c.agents / row.total) * 100 : 0;
+                            return pct > 0 ? (
+                              <div key={idx} style={{
+                                width: `${pct}%`, height: "100%",
+                                background: campColors[idx % campColors.length],
+                                display: "flex", alignItems: "center", justifyContent: "center",
+                                fontSize: 8, fontWeight: 700, color: C.bg, minWidth: c.agents > 0 ? 14 : 0,
+                              }}>{c.agents}</div>
+                            ) : null;
+                          })}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {/* Totals row */}
+                <tr style={{ background: C.acD }}>
+                  <td style={{ ...td, fontWeight: 700 }}>PICO</td>
+                  {allResults.map(({ camp, results }, idx) => {
+                    const peak = Math.max(...(results[dayView]?.map(r => r.agents) || [0]));
+                    return <td key={camp.id} style={{ ...td, fontWeight: 700, color: campColors[idx % campColors.length], textAlign: "center" }}>{peak}</td>;
+                  })}
+                  <td style={{ ...td, fontWeight: 700, color: C.ac, fontSize: 14, textAlign: "center" }}>
+                    {Math.max(...totals[dayView].map(t => t.total))}
+                  </td>
+                  <td style={{ ...td, fontWeight: 600, color: C.tD, fontSize: 11 }}>Máximo simultáneo</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          {/* Stacked bar chart */}
+          <div style={{ ...card, padding: 16, marginTop: 14 }}>
+            <h3 style={{ fontFamily: fontH, fontSize: 13, fontWeight: 600, margin: "0 0 12px", color: C.tD }}>
+              📊 Distribución de Agentes por Hora — {dayView}
+            </h3>
+            <div style={{ display: "flex", alignItems: "flex-end", gap: 5, height: 200 }}>
+              {HOURS.map((h, i) => {
+                const row = totals[dayView][i];
+                const pct = peakTotal > 0 ? (row.total / peakTotal) * 100 : 0;
+                return (
+                  <div key={h} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
+                    <span style={{ fontSize: 10, color: C.ac, fontWeight: 700 }}>{row.total}</span>
+                    <div style={{ width: "100%", height: `${pct}%`, minHeight: 2, borderRadius: "4px 4px 0 0", overflow: "hidden", display: "flex", flexDirection: "column-reverse" }}>
+                      {row.perCamp.map((c, idx) => {
+                        const segPct = row.total > 0 ? (c.agents / row.total) * 100 : 0;
+                        return <div key={idx} style={{ width: "100%", height: `${segPct}%`, background: campColors[idx % campColors.length], minHeight: c.agents > 0 ? 2 : 0 }} />;
+                      })}
+                    </div>
+                    <span style={{ fontSize: 9, color: C.tM }}>{h}</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </>
+      ) : (
+        /* Weekly summary */
+        <div style={{ ...card, padding: 16, overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={th}>Hora</th>
+                {DAYS.map((d, i) => (
+                  <th key={d} style={{ ...th, textAlign: "center" }}>{DAYS_SHORT[i]}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {HOURS.map((h, i) => (
+                <tr key={h} style={{ borderBottom: `1px solid ${C.bd}22` }}>
+                  <td style={{ ...td, fontWeight: 600, color: C.tD }}>{String(h).padStart(2, "0")}:00</td>
+                  {DAYS.map(d => {
+                    const t = totals[d][i].total;
+                    const ratio = peakTotal > 0 ? t / peakTotal : 0;
+                    const bg = ratio < 0.3 ? C.acD : ratio < 0.6 ? C.wD : ratio < 0.8 ? C.oD : C.rD;
+                    const color = ratio < 0.3 ? C.ac : ratio < 0.6 ? C.w : ratio < 0.8 ? C.o : C.r;
+                    return (
+                      <td key={d} style={{ ...td, textAlign: "center", fontWeight: 700, fontSize: 13, background: bg, color, border: `2px solid ${C.bg}`, borderRadius: 4 }}>
+                        {t}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+              <tr style={{ background: C.acD }}>
+                <td style={{ ...td, fontWeight: 700 }}>PICO</td>
+                {DAYS.map(d => (
+                  <td key={d} style={{ ...td, textAlign: "center", fontWeight: 700, color: C.ac, fontSize: 14 }}>
+                    {Math.max(...totals[d].map(t => t.total))}
+                  </td>
+                ))}
+              </tr>
+            </tbody>
+          </table>
+          {/* Breakdown per day */}
+          <div style={{ marginTop: 14 }}>
+            <h4 style={{ fontFamily: fontH, fontSize: 12, color: C.tD, margin: "0 0 8px" }}>Desglose por campaña — Pico del día</h4>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {DAYS.map((d, di) => {
+                const dayPeaks = allResults.map(({ camp, results }, idx) => ({
+                  name: camp.name,
+                  peak: Math.max(...(results[d]?.map(r => r.agents) || [0])),
+                  color: campColors[idx % campColors.length],
+                }));
+                const totalPeak = Math.max(...totals[d].map(t => t.total));
+                return (
+                  <div key={d} style={{ ...card, padding: "8px 12px", marginBottom: 0, flex: 1, minWidth: 120 }}>
+                    <div style={{ fontSize: 10, color: C.tM, textTransform: "capitalize", marginBottom: 4 }}>{DAYS_SHORT[di]}</div>
+                    {dayPeaks.map((p, j) => (
+                      <div key={j} style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginBottom: 2 }}>
+                        <span style={{ color: p.color }}>{p.name}</span>
+                        <span style={{ color: p.color, fontWeight: 600 }}>{p.peak}</span>
+                      </div>
+                    ))}
+                    <div style={{ borderTop: `1px solid ${C.bd}`, marginTop: 4, paddingTop: 4, display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                      <span style={{ color: C.ac, fontWeight: 700 }}>Total</span>
+                      <span style={{ color: C.ac, fontWeight: 700 }}>{totalPeak}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Summary KPIs */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 10, marginTop: 14 }}>
+        {(() => {
+          const overallPeak = Math.max(...DAYS.flatMap(d => totals[d].map(t => t.total)));
+          const avgHourly = DAYS.reduce((s, d) => s + totals[d].reduce((s2, t) => s2 + t.total, 0), 0) / (7 * 15);
+          const peakDay = DAYS.reduce((best, d) => {
+            const p = Math.max(...totals[d].map(t => t.total));
+            return p > best.val ? { day: d, val: p } : best;
+          }, { day: "", val: 0 });
+          const peakHour = HOURS.reduce((best, h, i) => {
+            const maxT = Math.max(...DAYS.map(d => totals[d][i].total));
+            return maxT > best.val ? { hour: h, val: maxT } : best;
+          }, { hour: 0, val: 0 });
+          return [
+            { label: "Pico Máximo Global", val: overallPeak, unit: "agentes", color: C.r },
+            { label: "Promedio por Hora", val: avgHourly.toFixed(1), unit: "agentes", color: C.bl },
+            { label: "Día Pico", val: `${peakDay.day} (${peakDay.val})`, unit: "", color: C.w },
+            { label: "Hora Pico", val: `${peakHour.hour}:00 (${peakHour.val})`, unit: "", color: C.o },
+            { label: "Campañas Activas", val: allResults.length, unit: "", color: C.p },
+          ];
+        })().map((k, i) => (
+          <div key={i} style={{ ...card, padding: "12px 14px", marginBottom: 0 }}>
+            <div style={{ fontSize: 10, color: C.tM, marginBottom: 4, textTransform: "uppercase" }}>{k.label}</div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: k.color, fontFamily: fontH }}>{k.val}</div>
+            {k.unit && <div style={{ fontSize: 10, color: C.tD }}>{k.unit}</div>}
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+//  TAB: HORARIOS / SCHEDULING
+// ═══════════════════════════════════════════════════════
+const DEFAULT_SHIFTS = [
+  { id: "ft_mat", label: "FT Matutino", short: "FT Mat", startH: 9, endH: 18, color: "#38bdf8", weekdays: true, weekend: "split", custom: false },
+  { id: "ft_vesp", label: "FT Vespertino", short: "FT Vesp", startH: 12, endH: 21, color: "#c084fc", weekdays: true, weekend: "split", custom: false },
+  { id: "ft_temp", label: "FT Temprano", short: "FT Temp", startH: 8, endH: 17, color: "#2dd4bf", weekdays: true, weekend: "split", custom: false },
+  { id: "ft_inter", label: "FT Intermedio", short: "FT Int", startH: 10, endH: 19, color: "#a78bfa", weekdays: true, weekend: "split", custom: false },
+  { id: "ft_lv", label: "FT L-V", short: "FT L-V", startH: 9, endH: 18, color: "#60a5fa", weekdays: true, weekend: "none", custom: false },
+  { id: "pt_man", label: "PT Mañana", short: "PT Mañ", startH: 9, endH: 15, color: "#fb923c", weekdays: true, weekend: "split", custom: false },
+  { id: "pt_tar", label: "PT Tarde", short: "PT Tar", startH: 15, endH: 21, color: "#f5c542", weekdays: true, weekend: "split", custom: false },
+  { id: "fds", label: "Fin de Semana", short: "FdS", startH: 9, endH: 21, color: "#22d3ee", weekdays: false, weekend: "both", custom: false },
+];
+
+const CUSTOM_COLORS = ["#f472b6","#a3e635","#e879f9","#fbbf24","#67e8f9","#fb7185","#4ade80","#c4b5fd","#fdba74","#86efac"];
+
+function ScheduleTab({ allResults, shifts, setShifts, staff, setStaff, satPct, setSatPct }) {
+  const [dayView, setDayView] = useState("lunes");
+  const [weekly, setWeekly] = useState(false);
+  // Custom shift form
+  const [showForm, setShowForm] = useState(false);
+  const [newShift, setNewShift] = useState({ label: "", startH: 9, endH: 18, weekdays: true, weekend: "split" });
+
+  const activeShifts = shifts.filter(s => (staff[s.id] || 0) > 0 || !s.custom);
+  const visibleShifts = shifts;
+
+  // Required
+  const required = useMemo(() => {
+    const res = {};
+    DAYS.forEach(d => { res[d] = HOURS.map((_, i) => allResults.reduce((s, { results }) => s + (results[d]?.[i]?.agents || 0), 0)); });
+    return res;
+  }, [allResults]);
+
+  const getCoverage = useCallback((shiftId, hour, day) => {
+    const sh = shifts.find(s => s.id === shiftId);
+    if (!sh) return 0;
+    const count = staff[shiftId] || 0;
+    if (count === 0) return 0;
+    if (!(hour >= sh.startH && hour < sh.endH)) return 0;
+    const isSat = day === "sábado", isSun = day === "domingo", isWd = !isSat && !isSun;
+    if (sh.weekend === "both") return (isSat || isSun) ? count : 0;
+    if (sh.weekend === "none") return isWd ? count : 0;
+    // split
+    if (isWd) return count;
+    if (isSat) return Math.round(count * (satPct[shiftId] || 50) / 100);
+    if (isSun) return count - Math.round(count * (satPct[shiftId] || 50) / 100);
+    return 0;
+  }, [shifts, staff, satPct]);
+
+  const coverage = useMemo(() => {
+    const res = {};
+    DAYS.forEach(d => {
+      res[d] = HOURS.map(h => {
+        const perShift = visibleShifts.map(sh => ({ id: sh.id, label: sh.short, agents: getCoverage(sh.id, h, d), color: sh.color }));
+        return { perShift, total: perShift.reduce((s, x) => s + x.agents, 0) };
+      });
+    });
+    return res;
+  }, [getCoverage, visibleShifts]);
+
+  // Auto-suggest (simple greedy for base shifts)
+  const autoSuggest = useCallback(() => {
+    const wdReq = HOURS.map((_, i) => Math.max(...DAYS.filter(d => d !== "sábado" && d !== "domingo").map(d => required[d][i])));
+    const sug = Object.fromEntries(shifts.map(s => [s.id, 0]));
+
+    // Cover hour 8 with FT Temprano
+    const h8need = wdReq[0]; // hour index 0 = 8:00
+    if (h8need > 0) sug.ft_temp = Math.ceil(h8need * 0.7);
+
+    const morningPeak = Math.max(...wdReq.slice(1, 4));
+    const middayPeak = Math.max(...wdReq.slice(4, 7));
+    const eveningPeak = Math.max(...wdReq.slice(10, 13));
+
+    sug.ft_mat = Math.max(0, Math.ceil(morningPeak * 0.5) - sug.ft_temp);
+    sug.pt_man = Math.max(0, morningPeak - sug.ft_mat - sug.ft_temp);
+    sug.ft_inter = Math.max(0, Math.ceil(middayPeak * 0.3) - sug.ft_mat);
+    sug.ft_vesp = Math.ceil(eveningPeak * 0.6);
+    sug.pt_tar = Math.max(0, eveningPeak - sug.ft_vesp);
+
+    const satReq = HOURS.map((_, i) => required["sábado"][i]);
+    const sunReq = HOURS.map((_, i) => required["domingo"][i]);
+    const wkndPeak = Math.max(...HOURS.map((h, i) => {
+      const wkdayCov = shifts.filter(s => s.weekend === "split").reduce((s, sh) => {
+        return s + ((h >= sh.startH && h < sh.endH) ? (sug[sh.id] || 0) * 0.5 : 0);
+      }, 0);
+      return Math.max(0, Math.max(satReq[i], sunReq[i]) - wkdayCov);
+    }));
+    sug.fds = Math.ceil(wkndPeak);
+
+    setStaff(prev => ({ ...prev, ...sug }));
+    const newSatPct = {};
+    shifts.filter(s => s.weekend === "split").forEach(s => { newSatPct[s.id] = 50; });
+    setSatPct(prev => ({ ...prev, ...newSatPct }));
+  }, [required, shifts]);
+
+  const addCustomShift = () => {
+    if (!newShift.label.trim()) return;
+    const id = "custom_" + Date.now();
+    const colorIdx = shifts.filter(s => s.custom).length;
+    const sh = {
+      id, label: newShift.label.trim(), short: newShift.label.trim().slice(0, 8),
+      startH: +newShift.startH, endH: +newShift.endH,
+      color: CUSTOM_COLORS[colorIdx % CUSTOM_COLORS.length],
+      weekdays: newShift.weekdays, weekend: newShift.weekend, custom: true,
+    };
+    setShifts(prev => [...prev, sh]);
+    setStaff(prev => ({ ...prev, [id]: 0 }));
+    if (sh.weekend === "split") setSatPct(prev => ({ ...prev, [id]: 50 }));
+    setNewShift({ label: "", startH: 9, endH: 18, weekdays: true, weekend: "split" });
+    setShowForm(false);
+  };
+
+  const removeShift = (id) => {
+    setShifts(prev => prev.filter(s => s.id !== id));
+    setStaff(prev => { const n = { ...prev }; delete n[id]; return n; });
+    setSatPct(prev => { const n = { ...prev }; delete n[id]; return n; });
+  };
+
+  const clearAll = () => {
+    const reset = {};
+    shifts.forEach(s => { reset[s.id] = 0; });
+    setStaff(reset);
+  };
+
+  const weekendLabel = (w) => w === "both" ? "Solo Sáb+Dom" : w === "none" ? "Solo L-V" : "L-V + Sáb ó Dom";
+
+  return (
+    <>
+      <h2 style={{ fontFamily: fontH, fontSize: 15, fontWeight: 600, margin: "0 0 6px" }}>🗓️ Desglose por Horarios</h2>
+      <p style={{ fontSize: 12, color: C.tD, margin: "0 0 14px" }}>
+        Asigna personas a cada tipo de turno y compara la cobertura vs el requerimiento total de todas las campañas.
+      </p>
+
+      {/* Shift cards */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(195px,1fr))", gap: 8, marginBottom: 10 }}>
+        {visibleShifts.map(sh => (
+          <div key={sh.id} style={{ ...card, padding: "10px 12px", marginBottom: 0, borderLeft: `3px solid ${sh.color}`, position: "relative" }}>
+            {sh.custom && <button onClick={() => removeShift(sh.id)} style={{ position: "absolute", top: 4, right: 6, background: "none", border: "none", color: C.r, fontSize: 12, cursor: "pointer", fontFamily: font }}>✕</button>}
+            <div style={{ fontSize: 11, fontWeight: 700, color: sh.color, marginBottom: 1, fontFamily: fontH }}>{sh.label}</div>
+            <div style={{ fontSize: 9, color: C.tD, marginBottom: 6 }}>
+              {sh.startH}:00–{sh.endH}:00 · {weekendLabel(sh.weekend)}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <label style={{ ...lbl, marginBottom: 0, fontSize: 9 }}>Personas</label>
+              <input type="number" min={0} value={staff[sh.id] || 0} onChange={e => setStaff(p => ({ ...p, [sh.id]: Math.max(0, +e.target.value || 0) }))}
+                style={{ ...inp, width: 55, textAlign: "center", fontSize: 13, fontWeight: 700 }} />
+            </div>
+            {sh.weekend === "split" && (
+              <div style={{ marginTop: 6 }}>
+                <div style={{ fontSize: 8, color: C.tM }}>Sáb {satPct[sh.id] || 50}% / Dom {100 - (satPct[sh.id] || 50)}%</div>
+                <input type="range" min={0} max={100} step={10} value={satPct[sh.id] || 50}
+                  onChange={e => setSatPct(p => ({ ...p, [sh.id]: +e.target.value }))} style={{ width: "100%", accentColor: sh.color }} />
+              </div>
+            )}
+          </div>
+        ))}
+        {/* Add custom shift card */}
+        <div onClick={() => setShowForm(true)} style={{ ...card, padding: "10px 12px", marginBottom: 0, borderLeft: `3px dashed ${C.bd}`, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", minHeight: 100 }}>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 22, color: C.tM }}>+</div>
+            <div style={{ fontSize: 10, color: C.tM }}>Agregar turno</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Custom shift form */}
+      {showForm && (
+        <div style={{ ...card, padding: 14, marginBottom: 10, border: `1px solid ${C.p}` }}>
+          <h4 style={{ fontFamily: fontH, fontSize: 12, color: C.p, margin: "0 0 10px" }}>➕ Crear Turno Personalizado</h4>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+            <div><label style={lbl}>Nombre</label><input value={newShift.label} onChange={e => setNewShift(p => ({ ...p, label: e.target.value }))} placeholder="Ej: PT Pico" style={{ ...inp, width: 140 }} /></div>
+            <div><label style={lbl}>Hora Inicio</label><select value={newShift.startH} onChange={e => setNewShift(p => ({ ...p, startH: +e.target.value }))} style={{ ...sel, width: 80 }}>{HOURS.map(h => <option key={h} value={h}>{h}:00</option>)}</select></div>
+            <div><label style={lbl}>Hora Fin</label><select value={newShift.endH} onChange={e => setNewShift(p => ({ ...p, endH: +e.target.value }))} style={{ ...sel, width: 80 }}>{HOURS.filter(h => h > newShift.startH).concat([22]).map(h => <option key={h} value={h}>{h}:00</option>)}</select></div>
+            <div><label style={lbl}>Días</label>
+              <select value={newShift.weekend} onChange={e => setNewShift(p => ({ ...p, weekend: e.target.value, weekdays: e.target.value !== "both" }))} style={{ ...sel, width: 150 }}>
+                <option value="split">L-V + Sáb ó Dom</option>
+                <option value="none">Solo L-V</option>
+                <option value="both">Solo Sáb + Dom</option>
+              </select>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={addCustomShift} style={{ padding: "6px 16px", borderRadius: 6, border: "none", background: C.p, color: C.bg, fontWeight: 700, fontSize: 11, cursor: "pointer", fontFamily: font }}>✅ Crear</button>
+            <button onClick={() => setShowForm(false)} style={{ padding: "6px 16px", borderRadius: 6, border: `1px solid ${C.bd}`, background: "transparent", color: C.tD, fontSize: 11, cursor: "pointer", fontFamily: font }}>Cancelar</button>
+          </div>
+        </div>
+      )}
+
+      {/* Actions */}
+      <div style={{ display: "flex", gap: 10, marginBottom: 14, alignItems: "center", flexWrap: "wrap" }}>
+        <button onClick={autoSuggest} style={{ padding: "8px 18px", borderRadius: 8, border: "none", background: C.p, color: C.bg, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: font }}>
+          🤖 Sugerir Distribución
+        </button>
+        <button onClick={clearAll} style={{ padding: "8px 14px", borderRadius: 8, border: `1px solid ${C.bd}`, background: "transparent", color: C.tD, fontSize: 11, cursor: "pointer", fontFamily: font }}>
+          🔄 Limpiar
+        </button>
+        <div style={{ fontSize: 11, color: C.tD }}>
+          Total personas: <span style={{ color: C.ac, fontWeight: 700 }}>{Object.values(staff).reduce((a, b) => a + b, 0)}</span>
+          {" · "}Turnos activos: <span style={{ color: C.bl, fontWeight: 600 }}>{visibleShifts.filter(s => (staff[s.id] || 0) > 0).length}</span>
+        </div>
+      </div>
+
+      {/* Day tabs */}
+      <div style={{ display: "flex", gap: 5, marginBottom: 12, flexWrap: "wrap" }}>
+        {DAYS.map(d => <button key={d} onClick={() => { setDayView(d); setWeekly(false); }} style={btn(dayView === d && !weekly, C.ac, C.acD)}>{d}</button>)}
+        <button onClick={() => setWeekly(!weekly)} style={btn(weekly, C.w, C.wD)}>📋 Semanal</button>
+      </div>
+
+      {!weekly ? (
+        <>
+          <div style={{ ...card, padding: 14, overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  <th style={th}>Hora</th>
+                  {visibleShifts.filter(s => (staff[s.id] || 0) > 0).map(sh => <th key={sh.id} style={{ ...th, color: sh.color, textAlign: "center", fontSize: 9 }}>{sh.short}</th>)}
+                  <th style={{ ...th, color: C.bl, textAlign: "center" }}>Tenemos</th>
+                  <th style={{ ...th, color: C.o, textAlign: "center" }}>Necesarios</th>
+                  <th style={{ ...th, textAlign: "center" }}>Δ</th>
+                  <th style={th}>Cobertura</th>
+                </tr>
+              </thead>
+              <tbody>
+                {HOURS.map((h, i) => {
+                  const cov = coverage[dayView][i];
+                  const req = required[dayView][i];
+                  const diff = cov.total - req;
+                  const pct = req > 0 ? (cov.total / req) * 100 : (cov.total > 0 ? 999 : 100);
+                  return (
+                    <tr key={h} style={{ borderBottom: `1px solid ${C.bd}22` }}>
+                      <td style={{ ...td, fontWeight: 600, color: C.tD }}>{String(h).padStart(2, "0")}:00</td>
+                      {cov.perShift.filter(s => (staff[s.id] || 0) > 0).map(s => (
+                        <td key={s.id} style={{ ...td, textAlign: "center", color: s.agents > 0 ? s.color : C.tM, fontSize: 11 }}>{s.agents}</td>
+                      ))}
+                      <td style={{ ...td, textAlign: "center", fontWeight: 700, color: C.bl }}>{cov.total}</td>
+                      <td style={{ ...td, textAlign: "center", fontWeight: 700, color: C.o }}>{req}</td>
+                      <td style={{ ...td, textAlign: "center", fontWeight: 700, fontSize: 13, color: diff > 0 ? C.ac : diff < 0 ? C.r : C.w }}>
+                        {diff > 0 ? "+" : ""}{diff}
+                      </td>
+                      <td style={{ ...td, width: 110 }}>
+                        <div style={{ background: C.bg, borderRadius: 4, height: 14, overflow: "hidden", position: "relative" }}>
+                          <div style={{ width: `${Math.min(pct, 100)}%`, height: "100%", background: diff >= 0 ? `linear-gradient(90deg,${C.ac},#059669)` : diff >= -2 ? C.w : C.r, borderRadius: 4 }} />
+                          {pct > 100 && <div style={{ position: "absolute", right: 3, top: 0, fontSize: 8, color: C.ac, fontWeight: 700 }}>+{(pct - 100).toFixed(0)}%</div>}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {(() => {
+                  const tCov = coverage[dayView].reduce((s, c) => s + c.total, 0);
+                  const tReq = required[dayView].reduce((s, r) => s + r, 0);
+                  return (
+                    <tr style={{ background: C.acD }}>
+                      <td style={{ ...td, fontWeight: 700 }}>TOTAL</td>
+                      {visibleShifts.filter(s => (staff[s.id] || 0) > 0).map(sh => <td key={sh.id} style={{ ...td, textAlign: "center", color: C.tM }}>—</td>)}
+                      <td style={{ ...td, textAlign: "center", fontWeight: 700, color: C.bl }}>{tCov}</td>
+                      <td style={{ ...td, textAlign: "center", fontWeight: 700, color: C.o }}>{tReq}</td>
+                      <td style={{ ...td, textAlign: "center", fontWeight: 700, color: tCov >= tReq ? C.ac : C.r }}>{tCov - tReq}</td>
+                      <td style={{ ...td, fontSize: 10, color: C.tD }}>{tReq > 0 ? ((tCov / tReq) * 100).toFixed(0) : "—"}%</td>
+                    </tr>
+                  );
+                })()}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Chart */}
+          <div style={{ ...card, padding: 16, marginTop: 14 }}>
+            <h3 style={{ fontFamily: fontH, fontSize: 13, fontWeight: 600, margin: "0 0 12px", color: C.tD }}>📊 Cobertura vs Requerimiento — {dayView}</h3>
+            <div style={{ display: "flex", alignItems: "flex-end", gap: 5, height: 180 }}>
+              {HOURS.map((h, i) => {
+                const cov = coverage[dayView][i];
+                const req = required[dayView][i];
+                const maxVal = Math.max(...HOURS.map((_, j) => Math.max(coverage[dayView][j].total, required[dayView][j])), 1);
+                const covPct = (cov.total / maxVal) * 100;
+                const reqPct = (req / maxVal) * 100;
+                return (
+                  <div key={h} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, position: "relative" }}>
+                    <span style={{ fontSize: 8, color: cov.total >= req ? C.ac : C.r, fontWeight: 600 }}>{cov.total}</span>
+                    <div style={{ width: "100%", position: "relative", height: `${Math.max(covPct, reqPct)}%`, minHeight: 4 }}>
+                      <div style={{ position: "absolute", bottom: 0, width: "70%", left: 0, height: `${covPct > 0 ? (covPct / Math.max(covPct, reqPct)) * 100 : 0}%`, borderRadius: "3px 3px 0 0", overflow: "hidden", display: "flex", flexDirection: "column-reverse" }}>
+                        {cov.perShift.filter(s => s.agents > 0).map(s => {
+                          const seg = cov.total > 0 ? (s.agents / cov.total) * 100 : 0;
+                          return <div key={s.id} style={{ width: "100%", height: `${seg}%`, background: s.color, minHeight: 2 }} />;
+                        })}
+                      </div>
+                      <div style={{ position: "absolute", bottom: `${reqPct > 0 ? (reqPct / Math.max(covPct, reqPct)) * 100 : 0}%`, right: 0, width: "40%", height: 2, background: C.o, borderRadius: 1 }} />
+                    </div>
+                    <span style={{ fontSize: 9, color: C.tM }}>{h}</span>
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{ display: "flex", gap: 12, marginTop: 8, fontSize: 10, color: C.tD }}>
+              <span>▮ Cobertura</span><span style={{ color: C.o }}>▬ Requerimiento</span>
+            </div>
+          </div>
+        </>
+      ) : (
+        <div style={{ ...card, padding: 14, overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr><th style={th}>Hora</th>{DAYS.map((d, i) => <th key={d} style={{ ...th, textAlign: "center" }} colSpan={3}>{DAYS_SHORT[i]}</th>)}</tr>
+              <tr><th style={{ ...th, fontSize: 8 }}></th>{DAYS.map(d => <React.Fragment key={d}><th style={{ ...th, fontSize: 8, color: C.bl }}>Ten</th><th style={{ ...th, fontSize: 8, color: C.o }}>Req</th><th style={{ ...th, fontSize: 8 }}>Δ</th></React.Fragment>)}</tr>
+            </thead>
+            <tbody>
+              {HOURS.map((h, i) => (
+                <tr key={h} style={{ borderBottom: `1px solid ${C.bd}22` }}>
+                  <td style={{ ...td, fontWeight: 600, color: C.tD, fontSize: 10 }}>{String(h).padStart(2, "0")}:00</td>
+                  {DAYS.map(d => {
+                    const cov = coverage[d][i].total, req = required[d][i], diff = cov - req;
+                    return (<React.Fragment key={d}>
+                      <td style={{ ...td, textAlign: "center", color: C.bl, fontSize: 10 }}>{cov}</td>
+                      <td style={{ ...td, textAlign: "center", color: C.o, fontSize: 10 }}>{req}</td>
+                      <td style={{ ...td, textAlign: "center", fontWeight: 700, fontSize: 10, color: diff > 0 ? C.ac : diff < 0 ? C.r : C.w, background: diff < 0 ? C.rD : diff > 0 ? C.acD : "transparent", borderRadius: 3 }}>{diff > 0 ? "+" : ""}{diff}</td>
+                    </React.Fragment>);
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* KPIs */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(155px,1fr))", gap: 10, marginTop: 14 }}>
+        {(() => {
+          const tp = Object.values(staff).reduce((a, b) => a + b, 0);
+          const gaps = DAYS.reduce((s, d) => s + HOURS.filter((_, i) => coverage[d][i].total < required[d][i]).length, 0);
+          const tot = 7 * 15;
+          const cp = ((tot - gaps) / tot * 100).toFixed(0);
+          const wg = DAYS.reduce((w, d) => { HOURS.forEach((h, i) => { const df = coverage[d][i].total - required[d][i]; if (df < w.diff) w = { diff: df, day: d, hour: h }; }); return w; }, { diff: 0, day: "", hour: 0 });
+          return [
+            { label: "Total Personas", val: tp, color: C.ac },
+            { label: "Franjas Cubiertas", val: `${cp}%`, color: gaps === 0 ? C.ac : C.w },
+            { label: "Franjas Faltantes", val: gaps, color: gaps > 0 ? C.r : C.ac },
+            { label: "Peor Brecha", val: wg.diff < 0 ? `${wg.diff} (${wg.day} ${wg.hour}:00)` : "Ninguna ✓", color: wg.diff < 0 ? C.r : C.ac },
+          ];
+        })().map((k, i) => (
+          <div key={i} style={{ ...card, padding: "12px 14px", marginBottom: 0 }}>
+            <div style={{ fontSize: 10, color: C.tM, marginBottom: 4, textTransform: "uppercase" }}>{k.label}</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: k.color, fontFamily: fontH }}>{k.val}</div>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+//  TAB 3: FTEs / TURNOS
+// ═══════════════════════════════════════════════════════
+function FTETab({ allResults }) {
+  const [selIdx, setSelIdx] = useState(0);
+  const [hrsPerShift, setHrs] = useState(8);
+  const [daysPerWeek, setDpw] = useState(6);
+  const [breakHrs, setBreak] = useState(1);
+  const { camp, results } = allResults[selIdx] || allResults[0];
+
+  const peakByDay = DAYS.map(d => Math.max(...(results[d]?.map(r => r.agents) || [0])));
+  const overallPeak = Math.max(...peakByDay);
+  const avgDaily = peakByDay.reduce((a, b) => a + b, 0) / 7;
+  const productiveHrs = hrsPerShift - breakHrs;
+  const fteNeeded = Math.ceil((overallPeak * 7) / (daysPerWeek * 1));
+  const totalHrsWeek = overallPeak * HOURS.length;
+
+  // Shrinkage breakdown
+  const [shrBreaks, setShrBreaks] = useState(8);
+  const [shrTraining, setShrTraining] = useState(3);
+  const [shrMeetings, setShrMeetings] = useState(2);
+  const [shrAbsent, setShrAbsent] = useState(4);
+  const [shrVacation, setShrVacation] = useState(3);
+  const totalShr = shrBreaks + shrTraining + shrMeetings + shrAbsent + shrVacation;
+
+  return (
+    <>
+      <h2 style={{ fontFamily: fontH, fontSize: 15, fontWeight: 600, margin: "0 0 14px" }}>👥 Cálculo de FTEs y Distribución de Turnos</h2>
+      <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+        <div><label style={lbl}>Campaña</label><select value={selIdx} onChange={e => setSelIdx(+e.target.value)} style={sel}>{allResults.map((r, i) => <option key={i} value={i}>{r.camp.name}</option>)}</select></div>
+        <PI label="Hrs/Turno" value={hrsPerShift} set={setHrs} />
+        <PI label="Días/Sem" value={daysPerWeek} set={setDpw} />
+        <PI label="Break (hrs)" value={breakHrs} set={setBreak} />
+      </div>
+
+      {/* KPI cards */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 10, marginBottom: 14 }}>
+        {[
+          { label: "Pico Máximo", val: overallPeak, unit: "agentes", color: C.r },
+          { label: "Promedio Diario", val: avgDaily.toFixed(1), unit: "agentes", color: C.w },
+          { label: "FTEs Estimados", val: fteNeeded, unit: "personas", color: C.ac },
+          { label: "Hrs Productivas/Turno", val: productiveHrs, unit: "horas", color: C.bl },
+          { label: "Shrinkage Total", val: totalShr + "%", unit: "", color: C.o },
+        ].map((k, i) => (
+          <div key={i} style={{ ...card, padding: "12px 14px", marginBottom: 0 }}>
+            <div style={{ fontSize: 10, color: C.tM, marginBottom: 4, textTransform: "uppercase" }}>{k.label}</div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: k.color, fontFamily: fontH }}>{k.val}</div>
+            <div style={{ fontSize: 10, color: C.tD }}>{k.unit}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Peak per day */}
+      <div style={{ ...card, padding: 16 }}>
+        <h3 style={{ fontFamily: fontH, fontSize: 13, fontWeight: 600, margin: "0 0 10px", color: C.tD }}>Pico de Agentes por Día</h3>
+        <div style={{ display: "flex", alignItems: "flex-end", gap: 10, height: 140 }}>
+          {DAYS.map((d, i) => {
+            const pct = (peakByDay[i] / overallPeak) * 100;
+            return (
+              <div key={d} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                <span style={{ fontSize: 11, color: C.ac, fontWeight: 700 }}>{peakByDay[i]}</span>
+                <div style={{ width: "100%", height: `${pct}%`, minHeight: 4, background: `linear-gradient(180deg,${C.bl},${C.p})`, borderRadius: "4px 4px 0 0" }} />
+                <span style={{ fontSize: 10, color: C.tM, textTransform: "capitalize" }}>{DAYS_SHORT[i]}</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Shrinkage calculator */}
+      <div style={{ ...card, padding: 16, marginTop: 14 }}>
+        <h3 style={{ fontFamily: fontH, fontSize: 13, fontWeight: 600, margin: "0 0 10px", color: C.tD }}>🔧 Calculadora de Shrinkage Desglosado</h3>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 12 }}>
+          <PI label="Breaks (%)" value={shrBreaks} set={setShrBreaks} />
+          <PI label="Capacitación (%)" value={shrTraining} set={setShrTraining} />
+          <PI label="Reuniones (%)" value={shrMeetings} set={setShrMeetings} />
+          <PI label="Ausentismo (%)" value={shrAbsent} set={setShrAbsent} />
+          <PI label="Vacaciones (%)" value={shrVacation} set={setShrVacation} />
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, height: 28, borderRadius: 6, overflow: "hidden", marginBottom: 8 }}>
+          {[{ v: shrBreaks, c: C.bl, l: "Breaks" }, { v: shrTraining, c: C.p, l: "Capac." }, { v: shrMeetings, c: C.w, l: "Reun." }, { v: shrAbsent, c: C.o, l: "Ausen." }, { v: shrVacation, c: C.r, l: "Vac." }].map((s, i) => (
+            <div key={i} style={{ width: `${(s.v / totalShr) * 100}%`, height: "100%", background: s.c, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 600, color: C.bg, minWidth: 30 }}>{s.v}%</div>
+          ))}
+        </div>
+        <div style={{ fontSize: 13, color: C.t }}>Shrinkage total: <span style={{ color: C.ac, fontWeight: 700 }}>{totalShr}%</span> → Factor multiplicador: <span style={{ color: C.w, fontWeight: 700 }}>{(1 / (1 - totalShr / 100)).toFixed(3)}x</span></div>
+      </div>
+    </>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+//  TAB 4: ESCENARIOS
+// ═══════════════════════════════════════════════════════
+function ScenarioTab({ campaigns }) {
+  const voiceCamps = campaigns.filter(c => c.model !== "msgs");
+  const [campIdx, setCampIdx] = useState(0);
+  const camp = voiceCamps[campIdx] || voiceCamps[0];
+  const [dayS, setDayS] = useState("lunes");
+
+  const [ahtA, setAhtA] = useState(camp?.params.aht || 300);
+  const [slA, setSlA] = useState(Math.round((camp?.params.targetSL || .8) * 100));
+  const [shrA, setShrA] = useState(camp?.params.shrinkage || 15);
+
+  const [ahtB, setAhtB] = useState((camp?.params.aht || 300) + 60);
+  const [slB, setSlB] = useState(Math.round((camp?.params.targetSL || .8) * 100));
+  const [shrB, setShrB] = useState((camp?.params.shrinkage || 15) + 5);
+
+  if (!camp) return <div style={{ ...card, padding: 20 }}>No hay campañas de voz para comparar. Agrega una campaña Erlang C o Erlang A.</div>;
+
+  const resA = HOURS.map((_, i) => findAgentsErlangC(camp.data[dayS]?.[i] || 0, ahtA, slA / 100, camp.params.targetTime, shrA));
+  const resB = HOURS.map((_, i) => findAgentsErlangC(camp.data[dayS]?.[i] || 0, ahtB, slB / 100, camp.params.targetTime, shrB));
+
+  return (
+    <>
+      <h2 style={{ fontFamily: fontH, fontSize: 15, fontWeight: 600, margin: "0 0 14px" }}>🔀 Comparativa de Escenarios</h2>
+      <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+        <div><label style={lbl}>Campaña</label><select value={campIdx} onChange={e => setCampIdx(+e.target.value)} style={sel}>{voiceCamps.map((c, i) => <option key={i} value={i}>{c.name}</option>)}</select></div>
+        <div><label style={lbl}>Día</label><select value={dayS} onChange={e => setDayS(e.target.value)} style={sel}>{DAYS.map(d => <option key={d} value={d}>{d}</option>)}</select></div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14 }}>
+        <div style={{ ...card, padding: 14, marginBottom: 0, borderColor: C.bl }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: C.bl, marginBottom: 10, fontFamily: fontH }}>🅰 Escenario A (Actual)</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            <PI label="AHT (seg)" value={ahtA} set={setAhtA} />
+            <PI label="SL (%)" value={slA} set={setSlA} />
+            <PI label="Shrinkage (%)" value={shrA} set={setShrA} />
+          </div>
+        </div>
+        <div style={{ ...card, padding: 14, marginBottom: 0, borderColor: C.o }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: C.o, marginBottom: 10, fontFamily: fontH }}>🅱 Escenario B (Alternativo)</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            <PI label="AHT (seg)" value={ahtB} set={setAhtB} />
+            <PI label="SL (%)" value={slB} set={setSlB} />
+            <PI label="Shrinkage (%)" value={shrB} set={setShrB} />
+          </div>
+        </div>
+      </div>
+
+      <div style={{ ...card, padding: 14, overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead><tr>
+            <th style={th}>Hora</th><th style={th}>Vol</th>
+            <th style={{ ...th, color: C.bl }}>Ag. A</th><th style={{ ...th, color: C.bl }}>SL A</th><th style={{ ...th, color: C.bl }}>Ocp A</th>
+            <th style={{ ...th, color: C.o }}>Ag. B</th><th style={{ ...th, color: C.o }}>SL B</th><th style={{ ...th, color: C.o }}>Ocp B</th>
+            <th style={th}>Δ Ag</th>
+          </tr></thead>
+          <tbody>
+            {HOURS.map((h, i) => {
+              const vol = camp.data[dayS]?.[i] || 0;
+              const diff = resB[i].agents - resA[i].agents;
+              return (
+                <tr key={h} style={{ borderBottom: `1px solid ${C.bd}22` }}>
+                  <td style={td}>{String(h).padStart(2, "0")}:00</td>
+                  <td style={td}>{vol}</td>
+                  <td style={{ ...td, color: C.bl, fontWeight: 600 }}>{resA[i].agents}</td>
+                  <td style={{ ...td, color: resA[i].sl >= .8 ? C.ac : C.r, fontSize: 11 }}>{(resA[i].sl * 100).toFixed(1)}%</td>
+                  <td style={{ ...td, fontSize: 11 }}>{(resA[i].occ * 100).toFixed(1)}%</td>
+                  <td style={{ ...td, color: C.o, fontWeight: 600 }}>{resB[i].agents}</td>
+                  <td style={{ ...td, color: resB[i].sl >= .8 ? C.ac : C.r, fontSize: 11 }}>{(resB[i].sl * 100).toFixed(1)}%</td>
+                  <td style={{ ...td, fontSize: 11 }}>{(resB[i].occ * 100).toFixed(1)}%</td>
+                  <td style={{ ...td, fontWeight: 700, color: diff > 0 ? C.r : diff < 0 ? C.ac : C.tD }}>{diff > 0 ? "+" : ""}{diff}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+//  TAB 5: INVERSA
+// ═══════════════════════════════════════════════════════
+function InverseTab() {
+  const [agents, setAgents] = useState(10);
+  const [calls, setCalls] = useState(50);
+  const [aht, setAht] = useState(300);
+  const [tgtTime, setTgtTime] = useState(30);
+  const [model, setModel] = useState("erlangC");
+  const [patience, setPatience] = useState(120);
+
+  const result = inverseSL(agents, calls, aht, tgtTime, model, patience);
+  const erlangs = (calls * aht) / 3600;
+
+  // Curve: vary agents from max(1, erlangs-2) to erlangs+15
+  const minN = Math.max(1, Math.floor(erlangs));
+  const curve = Array.from({ length: 20 }, (_, i) => {
+    const n = minN + i;
+    const r = inverseSL(n, calls, aht, tgtTime, model, patience);
+    return { n, ...r };
+  });
+  const maxSL = 1;
+
+  return (
+    <>
+      <h2 style={{ fontFamily: fontH, fontSize: 15, fontWeight: 600, margin: "0 0 14px" }}>🔄 Calculadora Inversa: Agentes → SL</h2>
+      <p style={{ fontSize: 12, color: C.tD, marginBottom: 14 }}>Dado un número de agentes, ¿qué nivel de servicio alcanzo? Útil para justificar contrataciones o evaluar impacto de reducción de personal.</p>
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 14 }}>
+        <PI label="Agentes" value={agents} set={setAgents} />
+        <PI label="Llamadas/Hora" value={calls} set={setCalls} />
+        <PI label="AHT (seg)" value={aht} set={setAht} />
+        <PI label="T. Espera (seg)" value={tgtTime} set={setTgtTime} />
+        <div><label style={lbl}>Modelo</label><select value={model} onChange={e => setModel(e.target.value)} style={sel}><option value="erlangC">Erlang C</option><option value="erlangA">Erlang A</option></select></div>
+        {model === "erlangA" && <PI label="Paciencia (seg)" value={patience} set={setPatience} />}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 10, marginBottom: 14 }}>
+        {[
+          { label: "Nivel de Servicio", val: (result.sl * 100).toFixed(1) + "%", color: result.sl >= .8 ? C.ac : result.sl >= .6 ? C.w : C.r },
+          { label: "Ocupación", val: (result.occ * 100).toFixed(1) + "%", color: result.occ > .85 ? C.r : result.occ > .7 ? C.w : C.ac },
+          { label: "ASA (seg)", val: result.asa < 999 ? result.asa.toFixed(1) : "∞", color: C.bl },
+          { label: "Tráfico (Erlangs)", val: erlangs.toFixed(2), color: C.p },
+        ].map((k, i) => (
+          <div key={i} style={{ ...card, padding: "12px 14px", marginBottom: 0 }}>
+            <div style={{ fontSize: 10, color: C.tM, marginBottom: 4, textTransform: "uppercase" }}>{k.label}</div>
+            <div style={{ fontSize: 24, fontWeight: 700, color: k.color, fontFamily: fontH }}>{k.val}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* SL Curve chart */}
+      <div style={{ ...card, padding: 16 }}>
+        <h3 style={{ fontFamily: fontH, fontSize: 13, fontWeight: 600, margin: "0 0 10px", color: C.tD }}>📈 Curva SL vs Agentes</h3>
+        <div style={{ position: "relative", height: 200, display: "flex", alignItems: "flex-end", gap: 4 }}>
+          {/* 80% line */}
+          <div style={{ position: "absolute", bottom: "80%", left: 0, right: 0, borderTop: `1px dashed ${C.ac}44`, zIndex: 1 }}>
+            <span style={{ position: "absolute", right: 0, top: -14, fontSize: 9, color: C.ac }}>80% SL</span>
+          </div>
+          {curve.map((c, i) => (
+            <div key={i} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
+              <span style={{ fontSize: 8, color: c.n === agents ? C.ac : C.tM }}>{(c.sl * 100).toFixed(0)}%</span>
+              <div style={{
+                width: "100%", height: `${c.sl * 100}%`, minHeight: 2,
+                background: c.n === agents ? C.ac : c.sl >= .8 ? `${C.ac}88` : c.sl >= .6 ? `${C.w}88` : `${C.r}88`,
+                borderRadius: "3px 3px 0 0", border: c.n === agents ? `2px solid ${C.ac}` : "none",
+              }} />
+              <span style={{ fontSize: 9, color: c.n === agents ? C.ac : C.tM, fontWeight: c.n === agents ? 700 : 400 }}>{c.n}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+//  TAB 6: EXPORTAR
+// ═══════════════════════════════════════════════════════
+function ExportTab({ allResults }) {
+  const [selIdx, setSelIdx] = useState(0);
+  const { camp, results } = allResults[selIdx] || allResults[0];
+  const isV = camp.model !== "msgs";
+
+  const generateCSV = () => {
+    let csv = "Día,Hora," + (isV ? "Llamadas" : "Mensajes") + ",Agentes_Req,Sin_Shrinkage";
+    if (isV) csv += ",SL,Ocupacion,ASA";
+    csv += "\n";
+    DAYS.forEach(d => {
+      HOURS.forEach((h, i) => {
+        const r = results[d]?.[i] || {};
+        const vol = camp.data[d]?.[i] || 0;
+        csv += `${d},${String(h).padStart(2, "0")}:00,${vol},${r.agents || 0},${r.raw || 0}`;
+        if (isV) csv += `,${((r.sl || 0) * 100).toFixed(1)}%,${((r.occ || 0) * 100).toFixed(1)}%,${r.asa < 999 ? r.asa?.toFixed(1) : "N/A"}`;
+        csv += "\n";
+      });
+    });
+    const a = document.createElement("a");
+    a.href = "data:text/csv;charset=utf-8,\uFEFF" + encodeURIComponent(csv);
+    a.download = `WFM_${camp.name.replace(/\s+/g, "_")}.csv`;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  };
+
+  const generateAllCSV = () => {
+    let csv = "Campaña,Modelo,Día,Hora,Volumen,Agentes_Req,Sin_Shrinkage\n";
+    allResults.forEach(({ camp: c, results: r }) => {
+      DAYS.forEach(d => {
+        HOURS.forEach((h, i) => {
+          const res = r[d]?.[i] || {};
+          csv += `${c.name},${c.model},${d},${String(h).padStart(2, "0")}:00,${c.data[d]?.[i] || 0},${res.agents || 0},${res.raw || 0}\n`;
+        });
+      });
+    });
+    const a = document.createElement("a");
+    a.href = "data:text/csv;charset=utf-8,\uFEFF" + encodeURIComponent(csv);
+    a.download = "WFM_Todas_Campanas.csv";
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  };
+
+  return (
+    <>
+      <h2 style={{ fontFamily: fontH, fontSize: 15, fontWeight: 600, margin: "0 0 14px" }}>📥 Exportar Datos</h2>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+        <div style={{ ...card, padding: 20, marginBottom: 0 }}>
+          <h3 style={{ fontFamily: fontH, fontSize: 14, fontWeight: 600, margin: "0 0 8px", color: C.bl }}>Exportar Campaña Individual</h3>
+          <div style={{ marginBottom: 12 }}>
+            <label style={lbl}>Seleccionar campaña</label>
+            <select value={selIdx} onChange={e => setSelIdx(+e.target.value)} style={sel}>
+              {allResults.map((r, i) => <option key={i} value={i}>{r.camp.name}</option>)}
+            </select>
+          </div>
+          <p style={{ fontSize: 11, color: C.tD, marginBottom: 12 }}>Exporta los volúmenes, agentes requeridos, SL, ocupación y ASA para todos los días y horas de la campaña seleccionada.</p>
+          <button onClick={generateCSV} style={{ padding: "10px 24px", borderRadius: 8, border: "none", background: C.bl, color: C.bg, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: font }}>
+            ⬇ Descargar CSV — {camp.name}
+          </button>
+        </div>
+        <div style={{ ...card, padding: 20, marginBottom: 0 }}>
+          <h3 style={{ fontFamily: fontH, fontSize: 14, fontWeight: 600, margin: "0 0 8px", color: C.ac }}>Exportar Todas las Campañas</h3>
+          <p style={{ fontSize: 11, color: C.tD, marginBottom: 12 }}>Genera un CSV consolidado con todas las campañas, modelos, volúmenes y agentes requeridos. Ideal para importar en Power BI o Excel.</p>
+          <button onClick={generateAllCSV} style={{ padding: "10px 24px", borderRadius: 8, border: "none", background: C.ac, color: C.bg, fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: font }}>
+            ⬇ Descargar CSV — Todas
+          </button>
+        </div>
+      </div>
+      <div style={{ ...card, padding: 16, marginTop: 14 }}>
+        <h3 style={{ fontFamily: fontH, fontSize: 13, fontWeight: 600, margin: "0 0 8px", color: C.tD }}>💡 Tips de Exportación</h3>
+        <div style={{ fontSize: 12, color: C.tD, lineHeight: 1.7 }}>
+          • Los archivos CSV se generan con codificación UTF-8 BOM para compatibilidad con Excel en español.<br />
+          • Puedes abrir directamente en Excel, Google Sheets o importar en Power BI.<br />
+          • El separador es coma (,). Si Excel no lo reconoce, usa la opción "Datos → Obtener datos → De archivo CSV".<br />
+          • Los porcentajes de SL y Ocupación se exportan con el símbolo %, conviértelos a número si necesitas hacer cálculos.
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+//  TAB 7: MANUAL
+// ═══════════════════════════════════════════════════════
+function ManualTab() {
+  const sections = [
+    { t: "1. Calculadora WFM (⚙️)", c: "La pestaña principal donde capturas volúmenes por hora (8:00–22:00) para cada día de la semana. Soporta 3 modelos:\n\n• Erlang C → Para llamadas entrantes. Parámetros: AHT, SL objetivo, tiempo de espera, shrinkage.\n• Erlang A → Como Erlang C pero con factor de paciencia/abandono del cliente.\n• Capacidad Mensajes → Para WhatsApp, Bitrix, chat. Define msgs/agente/hora.\n\nCada campaña es independiente con sus propios parámetros. Puedes agregar/eliminar campañas libremente." },
+    { t: "2. Importar Datos (📤)", c: "Permite cargar datos desde archivos CSV o Excel (.xlsx) en lugar de capturar manualmente. El archivo debe tener 3 columnas:\n\n• dia → nombre del día (lunes, martes, etc. o en inglés)\n• hora → franja horaria (8, 9, 10... 22)\n• volumen → cantidad de llamadas o mensajes\n\nFlujo de uso:\n1. Descarga la plantilla CSV si necesitas el formato\n2. Sube tu archivo (CSV, TSV, XLSX, XLS)\n3. Verifica la vista previa de datos\n4. Elige si cargar en una campaña existente o crear una nueva\n5. Clic en 'Aplicar Datos'\n\nAcepta separadores: coma, punto y coma, tabulador. Los nombres de columna son flexibles (dia/día/day, hora/franja/hour, llamadas/mensajes/volumen/calls, etc.).\n\nIMPORTANTE: La captura manual sigue funcionando. Los datos importados reemplazan los existentes en la campaña seleccionada." },
+    { t: "3. Mapa de Calor (🔥)", c: "Visualización tipo heatmap que muestra la intensidad de demanda (volumen o agentes) por hora y día de la semana. Los colores van de verde (bajo) a rojo (alto). Incluye gráfica de barras con el promedio semanal por hora.\n\nÚtil para identificar rápidamente picos y valles, y comunicar patrones de demanda a stakeholders." },
+    { t: "4. FTEs y Turnos (👥)", c: "Convierte los agentes requeridos por hora en headcount real considerando:\n\n• Horas por turno y días laborables por semana\n• Horas de break por turno\n• Calculadora de shrinkage desglosado (breaks, capacitación, reuniones, ausentismo, vacaciones)\n\nMuestra KPIs clave: pico máximo, promedio diario, FTEs estimados, y el factor multiplicador de shrinkage." },
+    { t: "5. Escenarios (🔀)", c: "Compara dos escenarios lado a lado con diferentes parámetros (AHT, SL, shrinkage). Muestra hora por hora la diferencia en agentes requeridos (Δ Ag).\n\nEjemplo de uso: ¿Qué pasa si el AHT sube 60 segundos? ¿Cuántos agentes más necesito? ¿Qué pasa si bajo el SL objetivo de 80% a 70%?" },
+    { t: "6. Calculadora Inversa (🔄)", c: "Dado un número fijo de agentes, calcula qué SL, ocupación y ASA se alcanza. Incluye curva visual de SL vs número de agentes.\n\nIdeal para: justificar contrataciones ante dirección, evaluar impacto de reducción de personal, o responder '¿con 8 agentes qué servicio damos?'" },
+    { t: "7. Exportar (📥)", c: "Genera archivos CSV (compatibles con Excel y Power BI) con los resultados de una campaña individual o todas las campañas consolidadas. Los archivos incluyen codificación UTF-8 BOM para soporte correcto de caracteres en español." },
+    { t: "8. Semáforo de Indicadores", c: "Los colores en SL y Ocupación funcionan como semáforo:\n\n• Verde (✅): SL ≥ 80% | Ocupación < 70%\n• Amarillo (⚠️): SL 60–80% | Ocupación 70–85%\n• Rojo (🔴): SL < 60% | Ocupación > 85%\n\nUna ocupación sostenida > 85% genera burnout. El rango ideal es 70–85%." },
+    { t: "9. Fórmulas Utilizadas", c: "• Erlangs = (Llamadas × AHT) / 3600\n• Erlang C P(w) = probabilidad de espera en cola\n• SL = 1 − P(w) × e^(−(N−A) × t/AHT)\n• Ocupación = Erlangs / N agentes\n• ASA = P(w) × AHT / (N − A)\n• Agentes con shrinkage = Agentes netos / (1 − shrinkage%)\n• Mensajes: Agentes = Volumen / (Msgs por agente por hora)" },
+  ];
+  return (
+    <>
+      <h2 style={{ fontFamily: fontH, fontSize: 15, fontWeight: 600, margin: "0 0 14px" }}>📖 Manual de Uso Completo</h2>
+      {sections.map((s, i) => (
+        <div key={i} style={{ ...card, padding: "14px 18px" }}>
+          <h3 style={{ fontFamily: fontH, fontSize: 14, color: C.t, marginTop: 0, marginBottom: 6 }}>{s.t}</h3>
+          <pre style={{ color: C.tD, fontSize: 12, margin: 0, whiteSpace: "pre-wrap", lineHeight: 1.6, fontFamily: font }}>{s.c}</pre>
+        </div>
+      ))}
+    </>
+  );
+}
+
+// ═══════════════════════════════════════════════════════
+//  TAB 8: DEFINICIONES
+// ═══════════════════════════════════════════════════════
+function DefsTab() {
+  const defs = [
+    { t: "Erlang C", d: "Modelo matemático de A.K. Erlang para calcular agentes necesarios asumiendo que todos los clientes esperan indefinidamente. Estándar de la industria para call centers inbound." },
+    { t: "Erlang A", d: "Extensión que incluye abandono (paciencia del cliente). Más realista — generalmente requiere menos agentes que Erlang C para el mismo SL." },
+    { t: "Erlang B", d: "Modelo para sistemas sin cola (bloqueo). Calcula probabilidad de ocupado. Usado para dimensionamiento de troncales, no de agentes." },
+    { t: "AHT (Average Handle Time)", d: "Tiempo Promedio de Manejo = Talk Time + Hold Time + ACW. Se mide en segundos. Es el indicador más importante para calcular carga." },
+    { t: "SLA / Nivel de Servicio", d: "% de llamadas contestadas dentro de un tiempo objetivo. Ej: 80/30 = 80% contestadas en ≤30 seg. Principal KPI de accesibilidad." },
+    { t: "ASA (Avg Speed of Answer)", d: "Tiempo promedio que un cliente espera antes de ser atendido. ASA bajo = buena accesibilidad." },
+    { t: "Ocupación (Occupancy)", d: "% del tiempo que agentes están ocupados vs disponible. Fórmula: Erlangs/N. Ideal: 70-85%. >85% causa burnout." },
+    { t: "Shrinkage", d: "% de tiempo pagado NO disponible para atender: breaks, capacitación, reuniones, ausentismo, vacaciones. Típico: 25-35%." },
+    { t: "Tráfico de Erlang", d: "Unidad de carga telefónica. 1 Erlang = 1 hora de ocupación. Fórmula: (Llamadas × AHT) / 3600." },
+    { t: "FCR (First Call Resolution)", d: "% de interacciones resueltas sin recontacto. FCR alto reduce volumen de rellamadas." },
+    { t: "TMO (Tiempo Medio Operativo)", d: "Equivalente hispano del AHT. Tiempo total que un agente dedica a una interacción completa." },
+    { t: "WFM (Workforce Management)", d: "Disciplina que incluye: forecasting, staffing, scheduling, real-time management y análisis de desempeño." },
+    { t: "Capacidad de Mensajes", d: "Modelo para canales asíncronos. Se divide volumen entre capacidad por agente. Ej: 20 msgs/hr ÷ 4/agente = 5 agentes." },
+    { t: "Abandono (%)", d: "% de llamadas donde el cliente cuelga antes de ser atendido. Inversamente proporcional al SL. >5% indica sub-dimensionamiento." },
+    { t: "Paciencia (Patience/ATA)", d: "En Erlang A: tiempo promedio que el cliente espera antes de abandonar. Típico: 60-180 seg según industria." },
+    { t: "Concurrencia", d: "En mensajería: conversaciones simultáneas por agente. A diferencia de voz (1 a la vez), chat maneja 2-4 simultáneas." },
+    { t: "Intervalo (Interval)", d: "Período de análisis WFM: 15 o 30 min. Intervalos más cortos = mayor precisión pero más granularidad requerida." },
+    { t: "FTE (Full Time Equivalent)", d: "Equivalente de tiempo completo. 1 FTE = una persona trabajando jornada completa. Permite comparar mezclas de turnos." },
+    { t: "Adherencia (Adherence)", d: "% del tiempo que un agente cumple su horario programado. Mide disciplina operativa. Objetivo: >90%." },
+    { t: "Blending", d: "Capacidad de asignar agentes a múltiples canales o skills dinámicamente según demanda en tiempo real." },
+  ];
+  return (
+    <>
+      <h2 style={{ fontFamily: fontH, fontSize: 15, fontWeight: 600, margin: "0 0 14px" }}>📚 Definiciones y Glosario WFM</h2>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(380px,1fr))", gap: 10 }}>
+        {defs.map((d, i) => (
+          <div key={i} style={{ ...card, padding: "12px 16px", marginBottom: 0 }}>
+            <div style={{ fontFamily: fontH, fontSize: 13, fontWeight: 600, color: C.ac, marginBottom: 4 }}>{d.t}</div>
+            <div style={{ color: C.tD, fontSize: 12, lineHeight: 1.5 }}>{d.d}</div>
+          </div>
+        ))}
+      </div>
+    </>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
+  </script>
+</body>
+</html>
