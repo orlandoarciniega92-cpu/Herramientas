@@ -1,0 +1,1104 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Comparativa Arquitectura Data Warehouse - Callcom</title>
+    <link href="https://fonts.googleapis.com/css2?family=Work+Sans:wght@400;500;600;700;800&family=Overpass+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        :root {
+            --teal: #00A99D;
+            --teal-dark: #008B82;
+            --gray-900: #111827;
+            --gray-800: #1F2937;
+            --gray-700: #374151;
+            --gray-600: #4B5563;
+            --gray-400: #9CA3AF;
+            --gray-200: #E5E7EB;
+        }
+        
+        body {
+            font-family: 'Work Sans', system-ui, sans-serif;
+            background: #0A0E14;
+            color: var(--gray-200);
+            line-height: 1.5;
+        }
+        
+        .wrapper {
+            max-width: 1600px;
+            margin: 0 auto;
+            background: #13161C;
+        }
+        
+        .masthead {
+            background: linear-gradient(180deg, #1A1E26 0%, #13161C 100%);
+            padding: 50px 70px 40px;
+            border-bottom: 1px solid rgba(0,169,157,0.2);
+            position: relative;
+        }
+        
+        .masthead::after {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: linear-gradient(90deg, transparent, var(--teal), transparent);
+        }
+        
+        .brand {
+            display: inline-flex;
+            align-items: center;
+            gap: 14px;
+            margin-bottom: 18px;
+        }
+        
+        .brand-mark {
+            width: 48px;
+            height: 48px;
+            background: var(--teal);
+            border-radius: 4px;
+            display: grid;
+            place-items: center;
+            font-weight: 800;
+            font-size: 26px;
+            color: white;
+            letter-spacing: -0.03em;
+        }
+        
+        .brand-text {
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--gray-400);
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+        }
+        
+        h1 {
+            font-size: 38px;
+            font-weight: 800;
+            color: white;
+            letter-spacing: -0.03em;
+            line-height: 1.2;
+            margin-bottom: 12px;
+        }
+        
+        .subtitle {
+            font-family: 'Overpass Mono', monospace;
+            font-size: 13px;
+            color: var(--gray-600);
+            letter-spacing: 0.02em;
+        }
+        
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 14px;
+            margin-top: 32px;
+        }
+        
+        .metric {
+            background: rgba(0,169,157,0.06);
+            border: 1px solid rgba(0,169,157,0.15);
+            padding: 16px 20px;
+            border-radius: 4px;
+            font-family: 'Overpass Mono', monospace;
+            font-size: 13px;
+            color: #D1D5DB;
+            transition: all 0.2s;
+        }
+        
+        .metric:hover {
+            background: rgba(0,169,157,0.1);
+            border-color: rgba(0,169,157,0.3);
+        }
+        
+        .metric-value {
+            color: var(--teal);
+            font-weight: 600;
+            font-size: 15px;
+        }
+        
+        .nav {
+            display: flex;
+            background: #1A1E26;
+            border-bottom: 1px solid #2A2F3A;
+            overflow-x: auto;
+        }
+        
+        .nav-item {
+            flex: 1;
+            min-width: 140px;
+            padding: 22px 24px;
+            text-align: center;
+            cursor: pointer;
+            font-weight: 700;
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--gray-600);
+            border: none;
+            background: transparent;
+            position: relative;
+            transition: all 0.15s;
+        }
+        
+        .nav-item::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: var(--teal);
+            transform: scaleX(0);
+            transition: transform 0.15s;
+        }
+        
+        .nav-item:hover {
+            color: #D1D5DB;
+            background: rgba(0,169,157,0.04);
+        }
+        
+        .nav-item.active {
+            color: white;
+            background: rgba(0,169,157,0.08);
+        }
+        
+        .nav-item.active::before {
+            transform: scaleX(1);
+        }
+        
+        .panel {
+            display: none;
+            padding: 60px 70px;
+        }
+        
+        .panel.active {
+            display: block;
+            animation: enter 0.25s ease;
+        }
+        
+        @keyframes enter {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .section-head {
+            font-size: 32px;
+            font-weight: 800;
+            color: white;
+            margin-bottom: 35px;
+            letter-spacing: -0.02em;
+        }
+        
+        .block {
+            background: #1A1E26;
+            border: 1px solid #2A2F3A;
+            padding: 28px;
+            border-radius: 6px;
+            margin-bottom: 28px;
+        }
+        
+        .block-header {
+            font-size: 19px;
+            font-weight: 700;
+            color: var(--teal);
+            margin-bottom: 16px;
+            letter-spacing: -0.01em;
+        }
+        
+        .block-content {
+            font-size: 15px;
+            color: #D1D5DB;
+            line-height: 1.7;
+        }
+        
+        .block-content ul {
+            list-style: none;
+            padding: 0;
+        }
+        
+        .block-content li {
+            padding: 9px 0;
+            padding-left: 28px;
+            position: relative;
+        }
+        
+        .block-content li::before {
+            content: "→";
+            position: absolute;
+            left: 0;
+            color: var(--teal);
+            font-weight: 700;
+            font-size: 16px;
+        }
+        
+        .block-content strong {
+            color: white;
+            font-weight: 600;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 22px;
+            margin: 32px 0;
+        }
+        
+        .card {
+            background: #1A1E26;
+            border: 1px solid #2A2F3A;
+            padding: 28px;
+            border-radius: 6px;
+            transition: all 0.2s;
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: var(--teal);
+            transform: scaleX(0);
+            transform-origin: left;
+            transition: transform 0.2s;
+        }
+        
+        .card:hover {
+            border-color: rgba(0,169,157,0.4);
+            transform: translateY(-2px);
+        }
+        
+        .card:hover::before {
+            transform: scaleX(1);
+        }
+        
+        .card-title {
+            font-size: 20px;
+            font-weight: 700;
+            color: white;
+            margin-bottom: 18px;
+            letter-spacing: -0.01em;
+        }
+        
+        .card-body {
+            font-size: 14px;
+            color: #D1D5DB;
+            line-height: 1.7;
+        }
+        
+        .card-body p {
+            margin: 10px 0;
+        }
+        
+        .card-body em {
+            color: var(--teal);
+            font-style: normal;
+            font-weight: 600;
+        }
+        
+        .hero {
+            background: linear-gradient(135deg, var(--teal-dark) 0%, var(--teal) 100%);
+            color: white;
+            padding: 45px;
+            border-radius: 6px;
+            margin: 35px 0;
+            text-align: center;
+            box-shadow: 0 16px 48px rgba(0,169,157,0.25);
+        }
+        
+        .hero-title {
+            font-size: 30px;
+            font-weight: 800;
+            margin-bottom: 14px;
+            letter-spacing: -0.02em;
+        }
+        
+        .hero-text {
+            font-size: 17px;
+            opacity: 0.95;
+            line-height: 1.6;
+        }
+        
+        .hero-text strong {
+            font-weight: 700;
+            text-decoration: underline;
+            text-decoration-thickness: 2px;
+            text-underline-offset: 3px;
+        }
+        
+        .data-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            margin: 28px 0;
+            font-size: 14px;
+        }
+        
+        .data-table thead th {
+            background: #1A1E26;
+            color: var(--teal);
+            padding: 16px;
+            text-align: left;
+            font-weight: 700;
+            text-transform: uppercase;
+            font-size: 12px;
+            letter-spacing: 0.08em;
+            border-bottom: 2px solid var(--teal);
+        }
+        
+        .data-table tbody td {
+            padding: 16px;
+            border-bottom: 1px solid #2A2F3A;
+            color: #D1D5DB;
+        }
+        
+        .data-table tbody tr {
+            transition: background 0.15s;
+        }
+        
+        .data-table tbody tr:hover {
+            background: rgba(0,169,157,0.05);
+        }
+        
+        .data-table .best {
+            background: rgba(0,169,157,0.12);
+            color: var(--teal);
+            font-weight: 700;
+        }
+        
+        .roadmap {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 18px;
+            margin: 32px 0;
+        }
+        
+        .step {
+            background: #1A1E26;
+            border: 1px solid #2A2F3A;
+            padding: 24px;
+            border-radius: 6px;
+            position: relative;
+        }
+        
+        .step::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 3px;
+            background: var(--teal);
+        }
+        
+        .step-label {
+            font-family: 'Overpass Mono', monospace;
+            font-size: 11px;
+            color: var(--teal);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            margin-bottom: 10px;
+        }
+        
+        .step-title {
+            font-size: 18px;
+            font-weight: 700;
+            color: white;
+            margin-bottom: 12px;
+            letter-spacing: -0.01em;
+        }
+        
+        .step-text {
+            font-size: 13px;
+            color: var(--gray-400);
+            line-height: 1.6;
+        }
+        
+        .notice {
+            background: rgba(239,68,68,0.08);
+            border: 1px solid rgba(239,68,68,0.25);
+            border-left: 4px solid #EF4444;
+            padding: 24px;
+            border-radius: 6px;
+            margin: 28px 0;
+        }
+        
+        .notice-title {
+            color: #EF4444;
+            font-weight: 700;
+            font-size: 16px;
+            margin-bottom: 12px;
+        }
+        
+        .notice-text {
+            color: #D1D5DB;
+            font-size: 14px;
+            line-height: 1.7;
+        }
+        
+        code {
+            background: rgba(0,169,157,0.15);
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-family: 'Overpass Mono', monospace;
+            font-size: 13px;
+            color: var(--teal);
+        }
+        
+        .split {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 22px;
+        }
+        
+        @media (max-width: 900px) {
+            .split {
+                grid-template-columns: 1fr;
+            }
+            
+            .masthead, .panel {
+                padding: 40px 30px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="wrapper">
+        <header class="masthead">
+            <div class="brand">
+                <div class="brand-mark">C</div>
+                <span class="brand-text">Contact Center & BPO</span>
+            </div>
+            <h1>Comparativa Arquitectura Data Warehouse</h1>
+            <p class="subtitle">Análisis técnico-financiero para decisión ejecutiva // Planeación y Estrategia</p>
+            
+            <div class="metrics">
+                <div class="metric">📊 Datos: <span class="metric-value">1.2 GB</span> actual (5m)</div>
+                <div class="metric">📈 Proyección: <span class="metric-value">10 GB</span> (2 años)</div>
+                <div class="metric">📞 Llamadas: <span class="metric-value">400K/mes</span></div>
+                <div class="metric">💬 Conversaciones: <span class="metric-value">70K/mes</span></div>
+                <div class="metric">🔄 Proceso: <span class="metric-value">ETL nocturno</span></div>
+                <div class="metric">🎯 Cruces: <span class="metric-value">60 días</span> histórico</div>
+            </div>
+        </header>
+        
+        <nav class="nav">
+            <button class="nav-item active" onclick="switchTab(0)">Azure SQL</button>
+            <button class="nav-item" onclick="switchTab(1)">BigQuery</button>
+            <button class="nav-item" onclick="switchTab(2)">MySQL</button>
+            <button class="nav-item" onclick="switchTab(3)">Servidor Físico</button>
+            <button class="nav-item" onclick="switchTab(4)">Decisión Final</button>
+        </nav>
+        
+        <!-- AZURE SQL -->
+        <section class="panel active">
+            <h2 class="section-head">Azure SQL Database</h2>
+            
+            <div class="block">
+                <h3 class="block-header">Descripción</h3>
+                <div class="block-content">
+                    <p>Base de datos relacional gestionada en la nube de Microsoft Azure. Modelo de pago mensual fijo por tier de servicio (DTUs o vCores). Integración nativa con Power BI y ecosistema Microsoft.</p>
+                </div>
+            </div>
+            
+            <div class="block">
+                <h3 class="block-header">Volumetría detallada Callcom</h3>
+                <div class="block-content">
+                    <div class="split">
+                        <div>
+                            <p><strong>Archivos Excel actuales (5 meses):</strong></p>
+                            <ul>
+                                <li>BI_llamadas_inconcert_1: 279 MB</li>
+                                <li>BI_llamadas_inconcert_2: 226 MB</li>
+                                <li>Mensajes_bitrix: 191 MB</li>
+                                <li>BI_Tiempos: 132 MB</li>
+                                <li>Otros archivos: ~370 MB</li>
+                                <li><strong>Total actual:</strong> 1.2 GB</li>
+                            </ul>
+                        </div>
+                        <div>
+                            <p><strong>Proyección crecimiento:</strong></p>
+                            <ul>
+                                <li>Tasa: ~240 MB/mes promedio</li>
+                                <li>Año 1: 3 GB total</li>
+                                <li>Año 2: 6 GB total</li>
+                                <li>Con 2 años histórico: 10 GB</li>
+                                <li>Con índices + logs: 15 GB total</li>
+                                <li><strong>Tier S0 (250 GB):</strong> Suficiente 15 años</li>
+                            </ul>
+                        </div>
+                    </div>
+                    <p style="margin-top: 16px;"><strong>Fuentes de datos:</strong> VICIdial (llamadas CDR), InConcert Cloud (llamadas + agentes), Bitrix24 (mensajes WhatsApp), CCC (Crediclub), Salesforce, CRM Smart, Cognito (tiempos)</p>
+                </div>
+            </div>
+            
+            <div class="grid">
+                <div class="card">
+                    <h3 class="card-title">Tiers disponibles</h3>
+                    <div class="card-body">
+                        <p><em>Basic:</em> 5 DTU, 2 GB máx — Insuficiente</p>
+                        <p><em>Standard S0:</em> 10 DTU, 250 GB — $15/mes</p>
+                        <p><em>Standard S1:</em> 20 DTU, 250 GB — $30/mes</p>
+                        <p><em>Standard S2:</em> 50 DTU, 250 GB — $75/mes</p>
+                        <p><em>General Purpose:</em> vCores escalables — $300-900/mes</p>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3 class="card-title">Performance estimado</h3>
+                    <div class="card-body">
+                        <p><em>S0 (desarrollo):</em> 30-90 seg cruces 10 GB</p>
+                        <p><em>S1 (producción):</em> 15-30 seg cruces</p>
+                        <p><em>S2 (múltiples usuarios):</em> 5-15 seg cruces</p>
+                        <p>Performance escalable según presupuesto, upgrade online instantáneo sin downtime.</p>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3 class="card-title">Ventajas</h3>
+                    <div class="card-body">
+                        <p><em>Ecosistema Microsoft:</em> T-SQL, Power BI nativo, Azure AD</p>
+                        <p><em>Arranque inmediato:</em> Sin esperar servidor físico</p>
+                        <p><em>Backups automáticos:</em> Point-in-time restore incluido</p>
+                        <p><em>Alta disponibilidad:</em> SLA 99.99%</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="block">
+                <h3 class="block-header">Costos proyectados 24 meses</h3>
+                <div class="block-content">
+                    <ul>
+                        <li><strong>Desarrollo (mes 1-3):</strong> S0 $15/mes = $45 total</li>
+                        <li><strong>Producción (mes 4-24):</strong> S1 $30/mes = $630 total</li>
+                        <li><strong>TOTAL 24 meses:</strong> $675 USD</li>
+                    </ul>
+                </div>
+            </div>
+            
+            <div class="notice">
+                <div class="notice-title">Limitación</div>
+                <div class="notice-text">Costo fijo mensual aunque no uses capacidad 24/7. Queries complejos requieren tier S2+ para evitar timeouts.</div>
+            </div>
+        </section>
+        
+        <!-- BIGQUERY -->
+        <section class="panel">
+            <h2 class="section-head">Google BigQuery</h2>
+            
+            <div class="block">
+                <h3 class="block-header">Descripción</h3>
+                <div class="block-content">
+                    <p>Data warehouse serverless de Google Cloud con arquitectura columnar. Modelo de pago por uso (storage + queries procesados). Sin infraestructura que administrar.</p>
+                </div>
+            </div>
+            
+            <div class="block">
+                <h3 class="block-header">Estimación costos con volumetría Callcom</h3>
+                <div class="block-content">
+                    <div class="split">
+                        <div>
+                            <p><strong>Storage (10 GB proyectado):</strong></p>
+                            <ul>
+                                <li>1.2 GB actual × $0.02 = $0.024/mes</li>
+                                <li>10 GB futuro × $0.02 = $0.20/mes</li>
+                                <li>Crecimiento lineal, sin sorpresas</li>
+                            </ul>
+                        </div>
+                        <div>
+                            <p><strong>Queries (50 GB scan/mes estimado):</strong></p>
+                            <ul>
+                                <li>Cruces diarios: 10 GB × 30 días = 300 GB scan</li>
+                                <li>Con particionado: 300 GB → 50 GB real</li>
+                                <li>50 GB × $0.00625 = $0.31/mes</li>
+                                <li><strong>Total:</strong> $0.20 + $0.31 = <strong>$0.51/mes</strong></li>
+                            </ul>
+                        </div>
+                    </div>
+                    <p style="margin-top: 16px; color: #EF4444;"><strong>⚠️ RIESGO FASE INICIAL:</strong> Sin particionado y buenas prácticas, queries exploratorios escanean tablas completas. Ejemplo: JOIN 7 tablas sin filtros = 10 GB scan × 20 pruebas/día = 200 GB/día = $40/día = $1,200/mes primer mes. Con controles: $5-10/mes estable.</p>
+                </div>
+            </div>
+            
+            <div class="grid">
+                <div class="card">
+                    <h3 class="card-title">Modelo de costos</h3>
+                    <div class="card-body">
+                        <p><em>Storage:</em> $0.02/GB/mes</p>
+                        <p><em>Queries:</em> $6.25/TB escaneado</p>
+                        <p><em>10 GB datos:</em> $0.20/mes storage</p>
+                        <p><em>50 GB queries/mes:</em> $0.30/mes</p>
+                        <p><em>Total típico:</em> $5-10/mes</p>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3 class="card-title">Performance</h3>
+                    <div class="card-body">
+                        <p><em>Cruces 10 GB:</em> &lt;5 segundos</p>
+                        <p><em>Arquitectura:</em> Columnar distribuida</p>
+                        <p><em>Escalabilidad:</em> Petabytes sin configuración</p>
+                        <p>Procesamiento paralelo masivo, ideal para queries analíticos complejos.</p>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3 class="card-title">Ventajas</h3>
+                    <div class="card-body">
+                        <p><em>Costo ultra bajo:</em> 95% más barato que Azure SQL (en analytics read-only)</p>
+                        <p><em>Performance superior:</em> Queries analíticos 5-10x más rápidos</p>
+                        <p><em>Zero administración:</em> Sin servidor que mantener</p>
+                        <p><em>Escalabilidad infinita:</em> Crece automáticamente</p>
+                    </div>
+                </div>
+                
+                <div class="card" style="border-color: rgba(239,68,68,0.3);">
+                    <h3 class="card-title" style="color: #EF4444;">⚠️ Limitaciones críticas</h3>
+                    <div class="card-body">
+                        <p><em>Ecosistema:</em> Fuera de Microsoft (conector Power BI menos fluido)</p>
+                        <p><em>Queries costosos:</em> Sin controles, scan full table puede disparar a $200-500/mes</p>
+                        <p><em>NO tiene UPDATE:</em> Usa MERGE (INSERT + DELETE) → Ineficiente para workloads transaccionales</p>
+                        <p><em>Patrón Callcom (2K updates/día):</em> 60K MERGE/mes = $50-100/mes real vs $0.51 teórico</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="block">
+                <h3 class="block-header">Protecciones durante desarrollo</h3>
+                <div class="block-content">
+                    <ul>
+                        <li><strong>Dataset DEV pequeño:</strong> 1 semana datos para pruebas (&lt;$1/mes)</li>
+                        <li><strong>Dry-run queries:</strong> Validar costo antes de ejecutar</li>
+                        <li><strong>Límites presupuesto:</strong> Alertas en $50/mes</li>
+                        <li><strong>Particionado por fecha:</strong> Escanear solo días necesarios</li>
+                        <li><strong>Clustering por campaña:</strong> Optimizar queries frecuentes</li>
+                    </ul>
+                </div>
+            </div>
+            
+            <div class="notice">
+                <div class="notice-title">Limitación</div>
+                <div class="notice-text">
+                    Fuera de ecosistema Microsoft. Conector Power BI menos fluido que Azure SQL nativo. 
+                    <br><br>
+                    <strong>RIESGO CRÍTICO INICIO PROYECTO:</strong> Sin controles estrictos, queries exploratorios pueden disparar costo a $200-500/mes en primeros meses (scan full table, joins mal optimizados, queries repetitivos sin particionado). Aunque aprendizaje es rápido, requiere disciplina inmediata en buenas prácticas SQL columnar. En Azure SQL el costo es fijo ($15/mes) independiente de errores.
+                    <br><br>
+                    <strong>RIESGO CRÍTICO OPERACIONES MERGE:</strong> BigQuery NO tiene UPDATE tradicional. Para actualizar registros usa patrón MERGE (INSERT nuevos + DELETE antiguos). Con patrón de uso Callcom (2,000 registros negociaciones/día que requieren actualizar etapa/responsable Bitrix), esto significa 2K × 30 días = 60K operaciones MERGE/mes. Aunque BigQuery cobra ~$0.10 por 1M operaciones DML, en práctica con re-procesos, pruebas y errores de desarrollo el costo real escala a $50-100/mes (vs $0.51 teórico analytics puro). <strong>Para workloads transaccionales write-heavy (inserts frecuentes + updates batch), bases relacionales tradicionales (Azure SQL/MySQL) son 10x más eficientes en costo.</strong>
+                </div>
+            </div>
+        </section>
+        
+        <!-- MYSQL -->
+        <section class="panel">
+            <h2 class="section-head">MySQL (Cloud)</h2>
+            
+            <div class="block">
+                <h3 class="block-header">Descripción</h3>
+                <div class="block-content">
+                    <p>Base de datos relacional open source. Opción cloud (Azure Database for MySQL) con costos medios-altos. Ya tienes experiencia con MySQL (VICIdial).</p>
+                </div>
+            </div>
+            
+            <div class="block">
+                <h3 class="block-header">Dimensionamiento para volumetría Callcom</h3>
+                <div class="block-content">
+                    <p><strong>Requerimientos estimados:</strong> 10 GB datos + 5 GB índices + 2 GB logs = 17 GB total. Procesamiento: 400K inserts/noche (llamadas) + 70K inserts/noche (conversaciones) + cruces 60 días (scan ~3 GB). Hardware mínimo: 4 vCores, 16 GB RAM.</p>
+                </div>
+            </div>
+            
+            <div class="grid">
+                <div class="card">
+                    <h3 class="card-title">Costos cloud</h3>
+                    <div class="card-body">
+                        <p><em>Azure MySQL General Purpose:</em></p>
+                        <p>4 vCores: $250/mes</p>
+                        <p>8 vCores: $400/mes</p>
+                        <p><em>Total 24 meses:</em> $3,000-4,800</p>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3 class="card-title">Performance</h3>
+                    <div class="card-body">
+                        <p><em>Queries 10 GB:</em> 8-15 seg (índices optimizados)</p>
+                        <p><em>Carga masiva:</em> 30-60 seg por 1M registros</p>
+                        <p>Performance adecuado para volumetría Callcom.</p>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3 class="card-title">Ventajas</h3>
+                    <div class="card-body">
+                        <p><em>Familiaridad:</em> Ya lo conoces (VICIdial usa MySQL)</p>
+                        <p><em>Experiencia comprobada:</em> Operaciones diarias</p>
+                        <p><em>Mantenimiento bajo:</em> No requiere VACUUM</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="notice">
+                <div class="notice-title">Limitación cloud</div>
+                <div class="notice-text">Costo 3-5x mayor que Azure SQL sin ventajas claras. No justifica inversión en cloud cuando servidor físico estará disponible.</div>
+            </div>
+        </section>
+        
+        <!-- SERVIDOR FÍSICO -->
+        <section class="panel">
+            <h2 class="section-head">Anexo: Servidor Físico On-Premise</h2>
+            <p style="color: var(--gray-400); margin-bottom: 35px; font-size: 15px;">Información de referencia para futura implementación (influye en decisión final)</p>
+            
+            <div class="block">
+                <h3 class="block-header">Contexto</h3>
+                <div class="block-content">
+                    <p>TI proporcionará servidor físico dedicado para Data Warehouse. Esta sección documenta opciones de motor de base de datos para consideración futura.</p>
+                </div>
+            </div>
+            
+            <div class="grid">
+                <div class="card">
+                    <h3 class="card-title">MySQL 8.0 ✓ RECOMENDADO</h3>
+                    <div class="card-body">
+                        <p><em>Costo:</em> $0 (open source perpetuo)</p>
+                        <p><em>Experiencia:</em> Alta (VICIdial)</p>
+                        <p><em>Performance:</em> 8-15 seg cruces</p>
+                        <p><em>Mantenimiento:</em> Bajo</p>
+                        <p><em>Hardware:</em> 16 GB RAM, 4 cores, 500 GB SSD</p>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3 class="card-title">PostgreSQL 16</h3>
+                    <div class="card-body">
+                        <p><em>Costo:</em> $0 (open source)</p>
+                        <p><em>Experiencia:</em> Baja (curva aprendizaje)</p>
+                        <p><em>Performance:</em> 5-10 seg cruces (superior)</p>
+                        <p><em>Mantenimiento:</em> Medio (requiere VACUUM)</p>
+                        <p><em>Hardware:</em> 16 GB RAM, 4 cores</p>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h3 class="card-title">SQL Server 2022</h3>
+                    <div class="card-body">
+                        <p><em>Costo:</em> $1K-3K/año licencia</p>
+                        <p><em>Experiencia:</em> Media (T-SQL similar Azure)</p>
+                        <p><em>Performance:</em> 6-12 seg cruces</p>
+                        <p><em>Mantenimiento:</em> Bajo</p>
+                        <p><em>Express gratis:</em> Límite 10 GB (insuficiente)</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="block">
+                <h3 class="block-header">Recomendación para TI</h3>
+                <div class="block-content">
+                    <ul>
+                        <li><strong>Motor sugerido:</strong> MySQL 8.0 Community Edition</li>
+                        <li><strong>Razón:</strong> Costo $0 perpetuo vs SQL Server $1K-3K/año, performance equivalente</li>
+                        <li><strong>Specs mínimas:</strong> 16-32 GB RAM, 4-8 cores, 500 GB SSD NVMe</li>
+                        <li><strong>Sistema operativo:</strong> Ubuntu Server 22.04 LTS</li>
+                        <li><strong>Migración desde Azure:</strong> Export/import schemas (2-3 días)</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+        
+        <!-- DECISIÓN FINAL -->
+        <section class="panel">
+            <h2 class="section-head">Recomendación Ejecutiva</h2>
+            
+            <div class="block">
+                <h3 class="block-header">Situación Actual</h3>
+                <div class="block-content">
+                    <ul>
+                        <li><strong>Responsable:</strong> Jorge Orlando Arciniega, Gerente Planeación y Estrategia</li>
+                        <li><strong>Datos:</strong> 1.2 GB Excel (5 meses) → 10 GB proyectado (2 años histórico)</li>
+                        <li><strong>Fuentes:</strong> VICIdial, InConcert, Bitrix24, CCC, Salesforce, CRM Smart, Cognito</li>
+                        <li><strong>Proceso:</strong> ETL nocturno automatizado → Cruces diarios 60 días → Power BI dirección</li>
+                        <li><strong>Recursos:</strong> Azure SQL Basic (2 GB límite, insuficiente) + Servidor físico (TI lo proporcionará)</li>
+                    </ul>
+                </div>
+            </div>
+            
+            <div class="hero">
+                <div class="hero-title">DECISIÓN RECOMENDADA</div>
+                <div class="hero-text">
+                    Estrategia Híbrida: Azure SQL (3 meses desarrollo) → MySQL On-Premise (producción permanente)
+                    <br><br>
+                    <strong>Inversión total 24 meses: $45-60 USD</strong>
+                </div>
+            </div>
+            
+            <div class="block" style="background: rgba(0,169,157,0.08); border-color: var(--teal);">
+                <h3 class="block-header">🔍 Análisis caso de uso real diario</h3>
+                <div class="block-content">
+                    <p><strong>Patrón operativo Callcom:</strong></p>
+                    <ul>
+                        <li><strong>Proceso 1:</strong> Subir 2,000 registros negociaciones/día</li>
+                        <li><strong>Proceso 2:</strong> Cruzar llamadas CDR vs leads para actualizar estatus</li>
+                        <li><strong>Proceso 3:</strong> Actualizar Bitrix (etapa + responsable) basado en cruces</li>
+                        <li><strong>Ventana temporal:</strong> Analizar 1 mes hacia atrás (~60K registros llamadas + 40K negociaciones)</li>
+                        <li><strong>Frecuencia:</strong> Proceso automatizado nocturno (00:00-03:00)</li>
+                    </ul>
+                    
+                    <div style="margin-top: 20px; padding: 20px; background: #1A1E26; border-radius: 6px;">
+                        <p style="font-size: 16px; font-weight: 600; color: white; margin-bottom: 12px;">Comparativa performance caso real:</p>
+                        
+                        <table class="data-table" style="margin: 0;">
+                            <thead>
+                                <tr>
+                                    <th>Operación</th>
+                                    <th style="text-align: center;">Azure SQL S0</th>
+                                    <th style="text-align: center;">BigQuery</th>
+                                    <th style="text-align: center;">MySQL On-Prem</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td><strong>INSERT 2K registros</strong></td>
+                                    <td style="text-align: center;">5-8 seg</td>
+                                    <td style="text-align: center;" class="best">1-2 seg</td>
+                                    <td style="text-align: center;">3-5 seg</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>JOIN llamadas × leads (60K × 40K)</strong></td>
+                                    <td style="text-align: center;">45-90 seg</td>
+                                    <td style="text-align: center;" class="best">&lt;5 seg</td>
+                                    <td style="text-align: center;">20-30 seg</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>UPDATE Bitrix staging table</strong></td>
+                                    <td style="text-align: center;">3-5 seg</td>
+                                    <td style="text-align: center;">No aplica*</td>
+                                    <td style="text-align: center;" class="best">2-3 seg</td>
+                                </tr>
+                                <tr style="background: rgba(0,169,157,0.05);">
+                                    <td><strong>TOTAL proceso nocturno</strong></td>
+                                    <td style="text-align: center;">~60-120 seg</td>
+                                    <td style="text-align: center;">&lt;10 seg**</td>
+                                    <td style="text-align: center;" class="best">~30-45 seg</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                        
+                        <p style="margin-top: 16px; font-size: 13px; color: var(--gray-400);">
+                            * BigQuery no tiene UPDATE tradicional, requiere INSERT + DELETE (merge)<br>
+                            ** BigQuery ultra rápido en JOIN pero el flujo completo (insert + merge + export) suma overhead
+                        </p>
+                    </div>
+                    
+                    <div style="margin-top: 20px; padding: 20px; background: linear-gradient(135deg, rgba(0,169,157,0.15) 0%, rgba(0,169,157,0.05) 100%); border-radius: 6px; border-left: 4px solid var(--teal);">
+                        <p style="font-size: 16px; font-weight: 700; color: var(--teal); margin-bottom: 12px;">✓ CONCLUSIÓN PARA TU CASO DE USO:</p>
+                        <p style="margin: 8px 0; line-height: 1.8;"><strong>Azure SQL S0 (desarrollo) → MySQL On-Premise (producción)</strong> es la mejor opción porque:</p>
+                        <ul style="margin-top: 12px;">
+                            <li><strong>Performance adecuado:</strong> 30-45 seg proceso completo (vs 3 horas manual actual en Excel)</li>
+                            <li><strong>Sin riesgo costos variables:</strong> BigQuery requiere MERGE para updates = costo por operación, puede explotar en $100-200/mes con 2K updates/día</li>
+                            <li><strong>Patrón INSERT + UPDATE frecuente:</strong> MySQL/Azure SQL optimizados para transacciones, BigQuery para analytics read-only</li>
+                            <li><strong>Proceso nocturno 3 AM:</strong> S0 tiene capacidad suficiente en horario sin concurrencia</li>
+                            <li><strong>Upgrade path claro:</strong> Si crece a 10K negociaciones/día → S1 ($30/mes), no saltos a $500/mes</li>
+                        </ul>
+                        <p style="margin-top: 12px; font-weight: 600; color: white;">Tu patrón de uso (inserts diarios + updates + joins) favorece 100% bases transaccionales (Azure SQL/MySQL) sobre data warehouses analíticos (BigQuery).</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="split">
+                <div class="block">
+                    <h3 class="block-header">FASE 1: Azure SQL S0 (3 meses)</h3>
+                    <div class="block-content">
+                        <p><strong>Costo:</strong> $45-60 total</p>
+                        <p><strong>Duración:</strong> Mayo-Julio 2026</p>
+                        <p><strong>Objetivo:</strong> Desarrollo rápido y validación</p>
+                        <ul>
+                            <li>Migrar datos Excel → Azure SQL (bronce/plata/oro)</li>
+                            <li>Desarrollar scripts Python ETL automatizados</li>
+                            <li>Crear stored procedures T-SQL (limpieza y cruces)</li>
+                            <li>Dashboards Power BI prototipos para validación</li>
+                        </ul>
+                        <p><strong>Ventaja:</strong> Arranque inmediato sin esperar servidor físico</p>
+                    </div>
+                </div>
+                
+                <div class="block">
+                    <h3 class="block-header">FASE 2: MySQL On-Premise (permanente)</h3>
+                    <div class="block-content">
+                        <p><strong>Costo:</strong> $0 perpetuo</p>
+                        <p><strong>Inicio:</strong> Agosto 2026</p>
+                        <p><strong>Objetivo:</strong> Producción definitiva on-premise</p>
+                        <ul>
+                            <li>TI instala MySQL 8.0 en servidor físico</li>
+                            <li>Migrar schemas Azure → MySQL (1 semana)</li>
+                            <li>Adaptar stored procedures T-SQL → MySQL syntax</li>
+                            <li>Power BI reconectar a MySQL vía ODBC</li>
+                        </ul>
+                        <p><strong>Ventaja:</strong> Control total + costo $0 perpetuo</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="block">
+                <h3 class="block-header">Comparativa de costos 24 meses</h3>
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Opción</th>
+                            <th style="text-align: center;">Desarrollo (3m)</th>
+                            <th style="text-align: center;">Producción (21m)</th>
+                            <th style="text-align: center;">Total 24 meses</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>HÍBRIDA (Azure 3m + MySQL on-prem)</strong></td>
+                            <td style="text-align: center;">$45-60</td>
+                            <td style="text-align: center;" class="best">$0</td>
+                            <td style="text-align: center;" class="best">$45-60</td>
+                        </tr>
+                        <tr>
+                            <td>Azure SQL S0→S1 (solo cloud)</td>
+                            <td style="text-align: center;">$45-60</td>
+                            <td style="text-align: center;">$630-900</td>
+                            <td style="text-align: center;">$675-960</td>
+                        </tr>
+                        <tr>
+                            <td>BigQuery (solo cloud)</td>
+                            <td style="text-align: center;">$15-30</td>
+                            <td style="text-align: center;">$105-200</td>
+                            <td style="text-align: center;">$120-230</td>
+                        </tr>
+                        <tr>
+                            <td>SQL Server on-prem (con licencia)</td>
+                            <td style="text-align: center;">$500-750</td>
+                            <td style="text-align: center;">$1,500-2,250</td>
+                            <td style="text-align: center;">$2,000-3,000</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <div class="split">
+                <div class="block">
+                    <h3 class="block-header">✓ Por qué esta decisión</h3>
+                    <div class="block-content">
+                        <ul>
+                            <li>Arranque inmediato (sin esperar servidor)</li>
+                            <li>Ecosistema Microsoft que ya dominas</li>
+                            <li>Validación rápida (2 semanas → dashboards)</li>
+                            <li>Experiencia MySQL comprobada (VICIdial)</li>
+                            <li>Costo ultra bajo ($45-60 total vs $675-3K)</li>
+                            <li>Sin licencias perpetuas (MySQL gratis)</li>
+                            <li>Control total datos (on-premise)</li>
+                            <li>Performance adecuado (8-15 seg vs Excel)</li>
+                        </ul>
+                    </div>
+                </div>
+                
+                <div class="block">
+                    <h3 class="block-header">✗ Opciones descartadas (considerando patrón de uso real)</h3>
+                    <div class="block-content">
+                        <p><strong>BigQuery:</strong> Aunque es rápido en JOINs analíticos, tu caso requiere INSERT diario (2K registros) + UPDATE masivo Bitrix. BigQuery no tiene UPDATE tradicional, usa patrón MERGE (INSERT + DELETE). Con 2K updates/día × 30 días = 60K operaciones MERGE/mes. Costo: ~$0.10 por 1M operaciones DML, pero con pruebas y re-procesos = $50-100/mes real vs $0.51 teórico. <strong>Riesgo crítico fase inicial:</strong> Sin controles, queries exploratorios pueden disparar a $200-500/mes. Azure SQL costo fijo $15/mes elimina este riesgo completamente.</p>
+                        
+                        <p><strong>Solo Azure SQL permanente:</strong> Funciona perfecto técnicamente (mejor para tu patrón INSERT/UPDATE que BigQuery), pero costo $630-900/24 meses vs $0 MySQL on-premise en producción. En desarrollo Azure SQL correcto, en producción migrar a MySQL ahorra $630.</p>
+                        
+                        <p><strong>SQL Server on-premise:</strong> Licencia $1K-3K/año vs MySQL gratis. Performance idéntico para tu volumetría (2K inserts + 60K×40K join + updates). No justifica costo.</p>
+                        
+                        <p><strong>PostgreSQL on-premise:</strong> Mejor en analytics complejos pero tu caso es transaccional clásico (OLTP): inserts frecuentes, updates batch, joins simples por fecha/ID. MySQL cubre 100% sin overhead VACUUM PostgreSQL.</p>
+                        
+                        <p style="margin-top: 16px; padding: 16px; background: rgba(0,169,157,0.1); border-radius: 6px; border-left: 3px solid var(--teal);"><strong>Conclusión:</strong> Tu patrón de uso (2K inserts/día + cruces + updates masivos) es caso de libro para bases transaccionales (MySQL/Azure SQL), NO para data warehouses analíticos (BigQuery). BigQuery brilla en read-only analytics pesados, pero tu proceso nocturno es write-heavy.</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="block">
+                <h3 class="block-header">Especificaciones servidor físico (para TI)</h3>
+                <div class="block-content">
+                    <div class="split">
+                        <div>
+                            <p><strong>Motor:</strong> MySQL 8.0 Community (gratis)</p>
+                            <p><strong>SO:</strong> Ubuntu Server 22.04 LTS</p>
+                            <p><strong>CPU:</strong> 4-8 cores</p>
+                        </div>
+                        <div>
+                            <p><strong>RAM:</strong> 16-32 GB</p>
+                            <p><strong>Almacenamiento:</strong> 500 GB - 1 TB SSD</p>
+                            <p><strong>Backup:</strong> 500 GB adicional</p>
+                        </div>
+                    </div>
+                    <p style="margin-top: 12px; font-size: 14px; color: var(--gray-400);"><em>Servidor físico influye en decisión final (MySQL on-premise = $0 perpetuo), pero no bloquea arranque inmediato en Azure SQL</em></p>
+                </div>
+            </div>
+            
+            <div style="background: linear-gradient(135deg, #1F2937 0%, #00A99D 100%); padding: 45px; border-radius: 6px; margin: 35px 0;">
+                <h3 style="color: white; font-size: 26px; font-weight: 800; margin-bottom: 22px; text-align: center;">Plan de Implementación (8 semanas - 2 hrs/día)</h3>
+                <div class="roadmap">
+                    <div class="step">
+                        <div class="step-label">Semana 1-2</div>
+                        <div class="step-title">Setup Azure</div>
+                        <div class="step-text">Crear Azure SQL S0 • Migrar 1 mes datos prueba • Scripts Python carga básica • 10 hrs totales</div>
+                    </div>
+                    <div class="step">
+                        <div class="step-label">Semana 3-5</div>
+                        <div class="step-title">ETL Completo</div>
+                        <div class="step-text">Python ETL 7 fuentes • Stored procedures limpieza • Schemas bronce/plata/oro • 30 hrs totales</div>
+                    </div>
+                    <div class="step">
+                        <div class="step-label">Semana 6-7</div>
+                        <div class="step-title">Dashboards</div>
+                        <div class="step-text">Power BI conectado • 5 dashboards dirección • Validación stakeholders • 20 hrs totales</div>
+                    </div>
+                    <div class="step">
+                        <div class="step-label">Semana 8-12</div>
+                        <div class="step-title">Migración On-Prem</div>
+                        <div class="step-text">TI instala MySQL • Export schemas • Ajustar stored procedures • Testing producción • 40 hrs totales</div>
+                    </div>
+                </div>
+                <p style="color: white; text-align: center; margin-top: 20px; font-size: 14px; opacity: 0.9;">
+                    <strong>Total: ~100 horas distribuidas en 3 meses (2 hrs/día promedio)</strong>
+                </p>
+            </div>
+            
+            <div class="notice">
+                <div class="notice-title">🚀 Acción inmediata (próximas 2 semanas - 2 hrs/día)</div>
+                <div class="notice-text">
+                    <strong>Semana 1 (10 hrs totales):</strong><br>
+                    • Día 1-2: Crear Azure SQL Database S0 en portal Azure, configurar firewall (4 hrs)<br>
+                    • Día 3-4: Script Python carga BI_llamadas_inconcert_1 → tabla bronce (4 hrs)<br>
+                    • Día 5: Stored procedure limpieza básica bronce → plata (2 hrs)<br><br>
+                    
+                    <strong>Semana 2 (10 hrs totales):</strong><br>
+                    • Día 1-3: Completar carga 4 archivos Excel restantes → bronce (6 hrs)<br>
+                    • Día 4-5: Power BI conectado + dashboard básico llamadas (4 hrs)<br><br>
+                    
+                    <strong>Resultado: 2 semanas → Prueba de concepto funcionando para presentar a dirección</strong>
+                </div>
+            </div>
+        </section>
+    </div>
+    
+    <script>
+        function switchTab(index) {
+            const tabs = document.querySelectorAll('.nav-item');
+            const panels = document.querySelectorAll('.panel');
+            
+            tabs.forEach(t => t.classList.remove('active'));
+            panels.forEach(p => p.classList.remove('active'));
+            
+            tabs[index].classList.add('active');
+            panels[index].classList.add('active');
+        }
+    </script>
+</body>
+</html>
